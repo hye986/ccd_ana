@@ -191,12 +191,34 @@ static PyObject *py_find_events_c(PyObject *self, PyObject *args)
             if (centre <= seed_s * noise[y * n_X + x])
                 continue;
 
-            /* Centre must be the 5×5 local maximum.
-             * Use strict less-than: if another pixel in the window equals
-             * centre, that pixel will also be a candidate and will pass its
-             * own lmax test at its own position. */
+            /* Centre must be the 5×5 local maximum. */
             if (centre < lmax[y * n_X + x])
                 continue;
+
+            /* Tie-breaker: if other pixels in the 5×5 window have the same
+             * value as the centre, accept only the lexicographically smallest
+             * (smallest y; on tie, smallest x).  This prevents the same
+             * physical cluster (e.g. an equally-split double, a 2×2 hot patch,
+             * or two pixels straddling an ASIC seam with identical residuals)
+             * from being reported as multiple overlapping events.  The seed
+             * loop bounds (y, x ∈ [2, n-3]) guarantee a full 5×5 window. */
+            {
+                int loses_tie = 0;
+                npy_intp dy, dx;
+                /* Rows strictly above the centre row */
+                for (dy = y - 2; dy < y && !loses_tie; dy++) {
+                    for (dx = x - 2; dx <= x + 2; dx++) {
+                        if (f[dy * n_X + dx] == centre) { loses_tie = 1; break; }
+                    }
+                }
+                /* Same row, strictly to the left of centre */
+                if (!loses_tie) {
+                    for (dx = x - 2; dx < x; dx++) {
+                        if (f[y * n_X + dx] == centre) { loses_tie = 1; break; }
+                    }
+                }
+                if (loses_tie) continue;
+            }
 
             /* Build 8-bit neighbour bitmask for the central 3×3. */
             uint8_t nbr = 0;
