@@ -25,55 +25,82 @@ from .geometry import ADC_MAX, ADC_RANGE
 def detect_and_unwrap_rollover(
         data:       np.ndarray,
         low_frac:   float = 0.10,
-        high_frac:  float = 0.80,
-        unwrap:     bool  = True,
+        high_frac:   float = 0.80,
+        unwrap:      bool  = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Detect (and optionally correct) 16-bit ADC rollover.
 
-    A pixel-frame is flagged when:
-      value < low_frac × ADC_MAX   AND
-      pixel median > high_frac × ADC_MAX
+    Rollover physics: the sensor baseline sits near ADC_MAX (e.g. ~60 000 ADU
+    for a 2^16 ADC).  A photon hit or noise spike pushes the reading above
+    ADC_MAX, and the ADC wraps to 0.  In a dark run you therefore see:
+      - many frames near the baseline value  (correct)
+      - some frames near 0                  (rolled)
+      - one correctly large value per hit    (the peak that caused the rollover)
+
+    A pixel-frame is flagged as rollover when ALL of:
+      (a) this pixel CAN reach the upper range — its dataset maximum exceeds
+          high_frac × ADC_MAX   (a dead/cold pixel never reaches high values,
+          so its low readings are real noise, not rollovers)
+      (b) this frame's raw value is below low_frac × ADC_MAX
 
     Parameters
     ----------
     data      : float32 (n_frames, Y, X) raw ADU values
-    low_frac  : suspicious-low threshold  (default 0.10)
-    high_frac : normally-high threshold   (default 0.80)
-    unwrap    : add ADC_RANGE to flagged values if True
+                Accepts uint16, which is typical from H5/Raw I/O.
+    low_frac  : suspicious-low threshold  (default 0.10 → 6 553 ADU)
+    high_frac : normally-high threshold   (default 0.80 → 52 428 ADU)
+                A pixel whose dataset max ≤ high_frac × ADC_MAX is never flagged —
+                it cannot reach the upper range, so any low value is not rollover.
+    unwrap    : add ADC_RANGE to flagged values if True  (default True)
 
     Returns
     -------
     out      : corrected copy (or original if nothing to do)
+               Always float32 when unwrap is applied to prevent uint16 overflow.
     rollover : bool mask (n_frames, Y, X)
     """
-    low_thresh  = low_frac  * ADC_MAX
-    high_thresh = high_frac * ADC_MAX
+    low_thresh  = low_frac  * ADC_MAX   # e.g. 6553
+    high_thresh = high_frac * ADC_MAX   # e.g. 52428
 
-    pixel_median = np.median(data, axis=0)
-    high_pixels  = pixel_median > high_thresh
-    rollover     = (data < low_thresh) & high_pixels[np.newaxis]
+    # Per-pixel canary: does this pixel ever reach the upper ADC range?
+    # Use the dataset max rather than the median so that a pixel that rolled
+    # over heavily (median ≈ 0) still has a high max and is correctly flagged.
+    # A dead/cold pixel (max < high_thresh) will never be flagged.
+    pixel_max = np.max(data, axis=0).astype(np.float64)
+    canary   = pixel_max > high_thresh           # (Y, X)
+
+    # Flag low-valued frames at pixels that can reach the upper range
+    low_mask = data < low_thresh                 # (N, Y, X)
+    rollover = low_mask & canary[np.newaxis]     # (N, Y, X)
 
     n_events = int(rollover.sum())
     n_pixels = int(rollover.any(axis=0).sum())
-    frac     = n_events / data.size * 100.0
+    frac     = n_events / data.size * 100.0 if data.size > 0 else 0.0
 
     print()
     print("┌─ ROLLOVER CHECK " + "─" * 50)
     print(f"│  Thresholds : low < {low_frac*100:.0f}%  ({low_thresh:.0f} ADU),  "
-          f"typical > {high_frac*100:.0f}%  ({high_thresh:.0f} ADU)")
+          f"canary > {high_frac*100:.0f}%  ({high_thresh:.0f} ADU)")
+    print(f"│  Pixel canary (dataset max > {high_thresh:.0f}): "
+          f"{int(canary.sum()):,} / {canary.size:,}  ({100*canary.mean():.1f}%)")
     print(f"│  Flagged pixel-frame events : {n_events:,}  ({frac:.4f}%)")
-    print(f"│  Affected unique pixels     : {n_pixels:,}")
+    print(f"│  Affected unique pixels      : {n_pixels:,}")
     if n_events > 0:
-        print("│  ⚠  ROLLOVER DETECTED — use unwrap=True to correct.")
+        print("│  ⚠  ROLLOVER DETECTED — applying unwrap (+{0} ADU to flagged).".format(ADC_RANGE))
     else:
         print("│  ✓  No rollover events detected.")
     print("└" + "─" * 67)
 
-    out = data.copy()
+    # Unwrap: promote flagged values by one ADC range.
+    # MUST use float32 here — adding ADC_RANGE to a uint16 array silently
+    # wraps on overflow (e.g. 0 + 65536 ≡ 0 mod 65536), corrupting the correction.
     if unwrap and n_events > 0:
+        out = data.astype(np.float32).copy()
         out[rollover] += ADC_RANGE
         print(f"  → Unwrapped {n_events:,} events (+{ADC_RANGE} ADU each).")
+    else:
+        out = data.copy()
 
     return out, rollover
 

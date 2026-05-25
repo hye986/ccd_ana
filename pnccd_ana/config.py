@@ -120,6 +120,14 @@ _DEFAULTS: dict[str, Any] = {
         "save_events":        True,
         "save_events_to_file": None,
         "prefer_offset":      "sigclip",
+        "bad_pixel_mask":     {           # set enabled: false to disable
+            "enabled":           True,
+            "hot_rms_multiple":  5.0,     # noise > this × median(noise) → HOT
+            "cold_rms_fraction": 0.1,     # noise < this × median(noise) → COLD/stuck
+            "max_clip_fraction": 0.5,     # if >50% of dark frames were clipped at the
+                                          # pixel → UNSTABLE (needs n_dark_frames)
+            "n_dark_frames":     0,       # 0 → skip clip-fraction test
+        },
     },
     "gain_calibration": {},
     "cti_calibration":  {},
@@ -280,6 +288,12 @@ source_spectrum:
   save_events: true
   save_events_to_file: run0001/events.h5
   prefer_offset: sigclip        # sigclip | median
+  bad_pixel_mask:               # exclude hot / cold / unstable pixels from event recognition
+    enabled: true
+    hot_rms_multiple: 5.0       # noise > this × median(active noise) → HOT
+    cold_rms_fraction: 0.1      # noise < this × median(active noise) → COLD / stuck
+    max_clip_fraction: 0.5      # frac of dark frames clipped per pixel above which it's UNSTABLE
+    n_dark_frames: 0            # 0 disables the clip-fraction test (no info in the cal file)
 
 # gain_calibration:             # uncomment and fill in for gain step
 #   events_file: run0001/events.h5

@@ -1,37 +1,49 @@
 """
 pnccd_ana.lib.geometry
 ======================
-Shared detector geometry constants for the 1024×1024 pnCCD.
+Shared detector geometry constants for the 1024x1024 pnCCD.
 
 Array / axis convention
-───────────────────────
+-----------------------
   data[frame, Y, X]
-    Y = axis=1 = vertical   screen axis = detector column direction
-    X = axis=2 = horizontal screen axis = detector row    direction
+    Y = axis 0 = vertical   screen axis     (code: "Y" variable)
+    X = axis 1 = horizontal screen axis     (code: "X" variable)
 
-  imshow(arr) maps axis=0(Y)→y-screen, axis=1(X)→x-screen automatically.
+  imshow(arr) with origin="lower" maps Y->y, X->x automatically.
   NO transpose needed.
-  x-axis label: "X (detector row)"
-  y-axis label: "Y (detector column)"
 
-ASIC layout  (HYB table: Y0 X0 Y1 X1, exclusive end → stored inclusive)
-─────────────────────────────────────────────────────────────────────────
+  Plot axis labels used throughout:
+    x-axis: "X [detector column]"  (horizontal direction)
+    y-axis: "Y [detector row]"      (vertical direction)
+
+  Terminology note — two competing conventions live in this file:
+    code's "X" variable = horizontal axis = your "detector column" direction
+    code's "Y" variable = vertical axis   = your "detector row"    direction
+  The physical CM algorithm (median per column) and every result are
+  identical regardless of which word appears on the axis label.
+
+ASIC layout  (your table format: Y0 X0 Y1 X1, exclusive end -> stored inclusive)
+------------------------------------------------------------------------------
   H0: Y 512-1023, X 512-1023  (top-right)
   H1: Y   0- 511, X 512-1023  (bottom-right)
   H2: Y   0- 511, X   0- 511  (bottom-left)
   H3: Y 512-1023, X   0- 511  (top-left)
 
-  Sensor as displayed (X on x-axis, Y on y-axis, origin=lower-left):
-  Y=1023 ┌───────────┬───────────┐
-         │    H3     │    H0     │
-         │ (top-left)│(top-right)│
-  Y= 512 ├───────────┼───────────┤
-         │    H2     │    H1     │
-         │(bot-left) │(bot-right)│
-  Y=   0 └───────────┴───────────┘
-        X=0        X=512       X=1023
+  Sensor as displayed (origin=lower-left  Y=0 at bottom):
+  Y=1023 +-----------+-----------+
+           |    H3    |    H0     |
+           | (top-lft)|(top-right)|
+  Y= 512 +-----------+-----------+
+           |    H2    |    H1     |
+           |(bot-left)|(bot-right)|
+  Y=   0 +-----------+-----------+
+        X=0         X=512       X=1023
 
-CM correction: median over Y (axis=1) for each X position.
+  All plotting calls use origin="lower" explicitly so the sensor appears
+  correct-side-up in saved PNGs.
+
+CM correction:  median over Y  (axis=0 in 2-D, axis=1 in 3-D per-frame input)
+               one CM value per X column; equivalently "median per vertical line".
 """
 
 from __future__ import annotations
@@ -39,10 +51,12 @@ from __future__ import annotations
 ADC_MAX   = 65535   # 2^16 - 1
 ADC_RANGE = 65536   # 2^16
 
-DETECTOR_HEIGHT = 1024   # Y axis
-DETECTOR_WIDTH  = 1024   # X axis
+DETECTOR_HEIGHT = 1024   # Y axis  (axis 0 in 2-D array)
+DETECTOR_WIDTH  = 1024   # X axis  (axis 1 in 2-D array)
 
 # (Y0, Y1, X0, X1) inclusive
+# Y0 = first row (smallest Y index), Y1 = last row (largest Y index)
+# X0 = first column (smallest X index), X1 = last column (largest X index)
 ASIC_SLICES: dict[str, tuple[int, int, int, int]] = {
     "H0": (512, 1023, 512, 1023),
     "H1": (  0,  511, 512, 1023),
@@ -66,9 +80,9 @@ ASIC_COLORS: dict[str, str] = {
     "H3": "#6aaa64",
 }
 
-# matplotlib subplot (row, col) positions for the physical 2×2 ASIC layout.
-# row=0 = top of figure = high-Y  (H3, H0)
-# col=0 = left of figure = low-X  (H3, H2)
+# matplotlib subplot (row, col) positions for the physical 2x2 ASIC layout.
+# row=0 = top of figure = high Y  (H3 top-left, H0 top-right)
+# col=0 = left of figure = low X  (H3 top-left, H2 bot-left)
 ASIC_GRID_POS: dict[str, tuple[int, int]] = {
     "H3": (0, 0),
     "H0": (0, 1),
@@ -83,9 +97,9 @@ def resolve_asics(asics: list[str] | None) -> list[str] | None:
 
     Parameters
     ----------
-    asics : None / [] → return None (full-frame mode)
-            ["all"]   → return ALL_ASICS
-            ["H0", "h1", ...] → upper-cased, validated
+    asics : None / [] -> return None (full-frame mode)
+            ["all"]   -> return ALL_ASICS
+            ["H0", "h1", ...] -> upper-cased, validated
 
     Returns None (full-frame) or a non-empty validated list.
     """
@@ -104,7 +118,7 @@ def split_asics(data, asic_names: list[str]) -> dict[str, object]:
     """
     Extract ASIC sub-arrays from a (n_frames, Y, X) or (Y, X) array.
 
-    Returns dict  name → sub-array  (same ndim as input).
+    Returns dict  name -> sub-array  (same ndim as input).
     """
     import numpy as np
     out: dict[str, object] = {}

@@ -17,7 +17,8 @@ import numpy as np
 
 from ..config import Config
 from ..lib    import (find_events, resolve_asics,
-                       ASIC_SLICES, ALL_ASICS, N_GRADES, EVENT_DTYPE)
+                       ASIC_SLICES, ALL_ASICS, N_GRADES, EVENT_DTYPE,
+                       build_bad_pixel_mask)
 from ..lib.common_mode import cm_correct_frame
 from ..utils  import (get_io_module,
                        load_calibration_h5, load_calibration_npy,
@@ -101,6 +102,86 @@ def _build_noise_map(cal: dict,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Bad-pixel mask construction
+# ──────────────────────────────────────────────────────────────────────────────
+
+_BAD_PIXEL_DEFAULTS = {
+    "enabled":           True,
+    "hot_rms_multiple":  5.0,
+    "cold_rms_fraction": 0.1,
+    "max_clip_fraction": 0.5,
+}
+
+
+def _build_bad_pixel_mask(
+        cal:         dict,
+        asics:       list[str] | None,
+        noise_map:   np.ndarray,
+        search_mask: np.ndarray | None,
+        user_cfg:    dict | None,
+) -> np.ndarray | None:
+    """
+    Assemble a 1024×1024 bad-pixel mask from the dark calibration.
+
+    Per-ASIC ``n_clipped_per_pixel`` and ``noise`` maps are used where
+    available; if only the global calibration exists, the per-ASIC slices
+    are read from the global maps.  Without any calibration data, the
+    function returns ``None`` (= no bad-pixel filtering applied).
+
+    Set ``bad_pixel_mask.enabled: false`` in the YAML config to disable
+    masking even when the dark calibration provides the relevant maps.
+    """
+    cfg = {**_BAD_PIXEL_DEFAULTS, **(user_cfg or {})}
+    if not cfg["enabled"]:
+        print("\nBad-pixel mask: DISABLED via config (bad_pixel_mask.enabled=false)")
+        return None
+
+    print("\nBuilding bad-pixel mask:")
+    mask = np.zeros(noise_map.shape, dtype=bool)
+    targets: list[tuple[str, np.ndarray, np.ndarray | None, np.ndarray]] = []
+
+    if asics:
+        for aname in asics:
+            Y0, Y1, X0, X1 = ASIC_SLICES[aname]
+            sub_active = np.ones((Y1 - Y0 + 1, X1 - X0 + 1), dtype=bool)
+            sub_noise  = noise_map[Y0:Y1+1, X0:X1+1]
+            sub_clip   = (cal.get(aname, {}).get("n_clipped_map")
+                          if cal.get(aname) is not None else None)
+            if sub_clip is None and "global" in cal:
+                sub_clip = cal["global"].get("n_clipped_map")
+                if sub_clip is not None:
+                    sub_clip = sub_clip[Y0:Y1+1, X0:X1+1]
+            targets.append((aname, sub_noise, sub_clip, sub_active))
+    else:
+        global_cal = cal.get("global", {})
+        clip = global_cal.get("n_clipped_map")
+        active = (search_mask if search_mask is not None
+                  else np.ones(noise_map.shape, dtype=bool))
+        targets.append(("global", noise_map, clip, active))
+
+    n_dark_frames = int(cfg.get("n_dark_frames") or 0)
+
+    for tag, sub_noise, sub_clip, sub_active in targets:
+        sub_mask = build_bad_pixel_mask(
+            sub_noise,
+            n_clipped_map     = sub_clip,
+            n_dark_frames     = n_dark_frames,
+            hot_rms_multiple  = float(cfg["hot_rms_multiple"]),
+            cold_rms_fraction = float(cfg["cold_rms_fraction"]),
+            max_clip_fraction = float(cfg["max_clip_fraction"]),
+            active_mask       = sub_active,
+            label             = tag,
+        )
+        if tag == "global":
+            mask = sub_mask
+        else:
+            Y0, Y1, X0, X1 = ASIC_SLICES[tag]
+            mask[Y0:Y1+1, X0:X1+1] = sub_mask
+
+    return mask
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # RAW sub-frame embedding
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -155,6 +236,7 @@ def _make_worker(cal: dict,
                  split_sigma: float,
                  reject_extra: bool,
                  search_mask: np.ndarray | None,
+                 bad_pixel_mask: np.ndarray | None = None,
                  sample_buf: list | None = None,
                  sample_max: int = 50):
     """
@@ -188,7 +270,8 @@ def _make_worker(cal: dict,
                                search_mask=search_mask,
                                seed_sigma=seed_sigma,
                                split_sigma=split_sigma,
-                               reject_extra=reject_extra)
+                               reject_extra=reject_extra,
+                               bad_pixel_mask=bad_pixel_mask)
             if len(evts):
                 chunk_events.append(evts)
         if chunk_events:
@@ -306,6 +389,14 @@ def run(cfg: Config) -> dict:
             Y0, Y1, X0, X1 = ASIC_SLICES[aname]
             search_mask[Y0:Y1+1, X0:X1+1] = True
 
+    # ── Build bad-pixel mask from calibration ─────────────────────────────────
+    bad_pixel_mask = _build_bad_pixel_mask(cal, asics, noise_map, search_mask,
+                                            sc.get("bad_pixel_mask"))
+    if bad_pixel_mask is not None and search_mask is not None:
+        bad_pixel_mask &= search_mask    # only flag pixels inside the active region
+    if bad_pixel_mask is not None and bool(bad_pixel_mask.any()):
+        np.save(out_dir / "bad_pixel_mask.npy", bad_pixel_mask)
+
     # ── Resolve file list (single path, glob, or list) ────────────────────────
     run_files = _resolve_paths(h5_path)
     print(f"\nSource run file(s): {len(run_files)} file(s) matched")
@@ -328,6 +419,7 @@ def run(cfg: Config) -> dict:
     worker = _make_worker(cal, asics, noise_map,
                           seed_sigma, split_sigma, reject_extra,
                           search_mask,
+                          bad_pixel_mask=bad_pixel_mask,
                           sample_buf=sample_buf, sample_max=200)
 
     all_results: list[np.ndarray] = []

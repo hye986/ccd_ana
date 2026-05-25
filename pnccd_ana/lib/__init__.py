@@ -10,6 +10,8 @@ from .pedestal            import (detect_and_unwrap_rollover,
 from .common_mode         import (cm_correct_frame,
                                    apply_common_mode_correction,
                                    compute_cm_noise)
-from .noise               import compute_noise
+from .noise               import compute_noise, build_bad_pixel_mask
 from .pattern_recognition import (find_events, N_GRADES, GRADE_NAMES,
-                                   EVENT_DTYPE, _GRADE_DEFS)
+                                   EVENT_DTYPE, _GRADE_DEFS,
+                                   local_max_5x5)
+from .process_frames      import (correct_frame, make_worker, process_frames_mt)

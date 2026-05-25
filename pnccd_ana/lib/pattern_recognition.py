@@ -6,6 +6,15 @@ Photon-event recognition with two-threshold design.
   seed_sigma  : higher threshold (e.g. 3–8 × noise) to find candidate centres
   split_sigma : lower threshold  (e.g. 1–3 × noise) to classify neighbours
 
+A seed must:
+  • exceed seed_sigma × noise,
+  • equal the maximum of its 5×5 window, and
+  • be the lexicographically smallest (smallest y; on tie, smallest x)
+    among any pixels in that window that share the same value.
+The last condition is a deterministic tie-breaker, so an evenly-split
+charge cluster (or a hot 2×2 patch) yields exactly one event instead of
+multiple overlapping duplicates.
+
 The hot path (local_max_5x5 + inner per-pixel loop + grade lookup) runs in C
 when the compiled extension is available, with a pure-NumPy fallback otherwise.
 
@@ -310,9 +319,15 @@ def grade_bitmask_histogram(
 
     for y in range(2, n_Y - 2):
         for x in range(2, n_X - 2):
-            if frame[y, x] <= seed_thr[y, x]:
+            cv = frame[y, x]
+            if cv <= seed_thr[y, x]:
                 continue
-            if frame[y, x] < lmax[y, x]:
+            if cv < lmax[y, x]:
+                continue
+            # Same lex-smallest tie-breaker as find_events(), so the histogram
+            # reflects exactly the seed set that find_events() will produce.
+            window = frame[y-2:y+3, x-2:x+3]
+            if (window[:2, :] == cv).any() or (window[2, :2] == cv).any():
                 continue
             mask = 0
             for (dY, dX), bit in _OFFSET_TO_BIT.items():
@@ -354,24 +369,57 @@ def summarise_unknown_patterns(
 # ── main recognition function ─────────────────────────────────────────────────
 
 def find_events(
-        corrected:    np.ndarray,
-        noise_map:    np.ndarray,
-        search_mask:  np.ndarray | None = None,
-        seed_sigma:   float = 5.0,
-        split_sigma:  float = 3.0,
-        reject_extra: bool  = False,
+        corrected:       np.ndarray,
+        noise_map:       np.ndarray,
+        search_mask:     np.ndarray | None = None,
+        seed_sigma:      float = 5.0,
+        split_sigma:     float = 3.0,
+        reject_extra:    bool  = False,
+        bad_pixel_mask:  np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Find and classify photon events in a single CM-corrected frame.
 
+    Seed selection rule
+    ───────────────────
+    A pixel becomes a seed when it satisfies, in order:
+      1. centre value  > seed_sigma × noise(centre)               (seed threshold)
+      2. centre value == max(5×5 window centred on it)            (local max)
+      3. centre is the lexicographically smallest pixel (smallest y;
+         on tie, smallest x) among all 5×5-window pixels that share
+         the same value                                            (tie-breaker)
+
+    The third rule guarantees that an evenly-split charge cluster, a
+    2×2 hot-pixel patch, or any other tied configuration produces exactly
+    one event instead of N overlapping duplicates.
+
+    Grade is then determined from the central 3×3 mask of pixels exceeding
+    split_sigma × noise (the centre is implicitly included).
+
+    Pixel masking
+    ─────────────
+    Two boolean masks may be supplied.  Pixels excluded by either are
+    treated as zero in the frame copy used for recognition; consequently
+    they cannot become a seed AND they never contribute to a neighbour's
+    bitmask or ADU sum:
+
+      search_mask    : True where the pixel is inside the active ASIC region
+                       (geometric).  None → use the whole frame.
+      bad_pixel_mask : True where the pixel is BAD (hot / cold / unstable —
+                       typically from :func:`pnccd_ana.lib.noise.build_bad_pixel_mask`).
+                       None → no bad-pixel filtering.
+
     Parameters
     ----------
-    corrected    : float32 (n_Y, n_X) — CM-corrected frame
-    noise_map    : float32 (n_Y, n_X) — per-pixel noise [ADU RMS]
-    search_mask  : bool (n_Y, n_X) or None — restrict search to active ASICs
-    seed_sigma   : seed-detection threshold multiplier (typical 3–8)
-    split_sigma  : neighbour-classification threshold multiplier (typical 1–3)
-    reject_extra : if True, discard grade-13 ("other") events
+    corrected      : float32 (n_Y, n_X) — CM-corrected frame
+    noise_map      : float32 (n_Y, n_X) — per-pixel noise [ADU RMS]
+    search_mask    : bool (n_Y, n_X) or None — geometric active mask
+                     (True = inside the ASIC region).
+    seed_sigma     : seed-detection threshold multiplier (typical 3–8)
+    split_sigma    : neighbour-classification threshold multiplier (typical 1–3)
+    reject_extra   : if True, discard grade-13 ("other") events
+    bad_pixel_mask : bool (n_Y, n_X) or None — True where the pixel is bad
+                     and must be excluded from event recognition.
 
     Returns
     -------
@@ -380,9 +428,20 @@ def find_events(
     frame = np.ascontiguousarray(corrected, dtype=np.float32)
     noise = np.ascontiguousarray(noise_map, dtype=np.float32)
 
+    # Combine the geometric search_mask (good=True) with the bad-pixel mask
+    # (bad=True) into a single "include" mask.  Zero-filling everything
+    # outside that mask in a frame copy is enough to suppress both seed
+    # detection AND neighbour contribution in one step (a zero pixel cannot
+    # exceed split_sigma × noise as long as noise > 0).
+    include = None
     if search_mask is not None:
+        include = search_mask.astype(bool, copy=False)
+    if bad_pixel_mask is not None:
+        bad_bool = bad_pixel_mask.astype(bool, copy=False)
+        include  = (~bad_bool) if include is None else (include & ~bad_bool)
+    if include is not None:
         frame = frame.copy()
-        frame[~search_mask] = 0.0
+        frame[~include] = 0.0
 
     lmax = local_max_5x5(frame)
 
@@ -419,22 +478,31 @@ def find_events(
     rows_l, cols_l, grades_l, sigs_l, seeds_l = [], [], [], [], []
 
     for cy, cx in zip(cand_Y, cand_X):
-        above = frame[cy-2:cy+3, cx-2:cx+3] > split_thr[cy-2:cy+3, cx-2:cx+3]
+        cv = float(frame[cy, cx])
+
+        # Tie-breaker: if any pixel in the 5×5 window with a strictly
+        # smaller (y, x) lexicographic position has the same value as the
+        # centre, this candidate loses the tie and is skipped.  The
+        # lexicographically smallest tied pixel becomes the unique seed for
+        # the cluster.  Matches the C extension exactly.
+        window = frame[cy-2:cy+3, cx-2:cx+3]
+        if (window[:2, :] == cv).any() or (window[2, :2] == cv).any():
+            continue
+
+        above = window > split_thr[cy-2:cy+3, cx-2:cx+3]
         grade = _classify_patch(above)
         if grade == GRADE_REJECTED or (reject_extra and grade == GRADE_OTHER):
             continue
 
-        seed_val = float(frame[cy, cx])
-
         if grade == 0 or grade == GRADE_OTHER:
-            sig = seed_val
+            sig = cv
         else:
             _, _, offsets = _GRADE_DEFS[grade]
-            sig = seed_val + sum(float(frame[cy+dY, cx+dX]) for dY, dX in offsets)
+            sig = cv + sum(float(frame[cy+dY, cx+dX]) for dY, dX in offsets)
 
         rows_l.append(int(cy));   cols_l.append(int(cx))
         grades_l.append(grade);   sigs_l.append(sig)
-        seeds_l.append(seed_val)
+        seeds_l.append(cv)
 
     if not rows_l:
         return np.empty(0, dtype=EVENT_DTYPE)
