@@ -47,57 +47,20 @@ def _load_cal(cal_source: str,
 
 
 def _build_noise_map(cal: dict,
-                     asics: list[str] | None,
                      noise_scope: str = "auto") -> np.ndarray:
     """
-    Assemble a full 1024×1024 noise map from calibration.
-
-    If per-ASIC noise maps are available they are stitched in;
-    otherwise the global map is used.  Regions outside the active
-    ASICs get a huge noise value (1e9) so they never trigger.
+    Assemble a full noise map from calibration for single-hybrid.
+    
+    For single-hybrid mode, returns the global noise map directly.
     """
     noise_scope = (noise_scope or "auto").lower()
-    noise = np.full((1024, 1024), 1e9, dtype=np.float32)
-
-    def _fill_from_global() -> np.ndarray:
-        if "global" not in cal or "noise" not in cal["global"]:
-            raise RuntimeError("Global noise map requested but not found in calibration.")
-        if not asics:
-            return cal["global"]["noise"].copy()
-        out = np.full((1024, 1024), 1e9, dtype=np.float32)
-        for aname in asics:
-            Y0, Y1, X0, X1 = ASIC_SLICES[aname]
-            out[Y0:Y1+1, X0:X1+1] = cal["global"]["noise"][Y0:Y1+1, X0:X1+1]
-        return out
-
-    use_global = noise_scope == "global"
-    if noise_scope == "auto" and asics and "global" in cal and all(a in cal for a in asics):
-        global_vals = []
-        asic_vals = []
-        for aname in asics:
-            Y0, Y1, X0, X1 = ASIC_SLICES[aname]
-            global_vals.append(cal["global"]["noise"][Y0:Y1+1, X0:X1+1])
-            asic_vals.append(cal[aname]["noise"])
-        global_med = float(np.nanmedian(np.concatenate([a.ravel() for a in global_vals])))
-        asic_med = float(np.nanmedian(np.concatenate([a.ravel() for a in asic_vals])))
-        if global_med > 0 and asic_med < 0.5 * global_med:
-            print(f"  ⚠  ASIC noise median ({asic_med:.1f} ADU) is much lower than "
-                  f"global median ({global_med:.1f} ADU); using global noise slices "
-                  "for event thresholds.")
-            use_global = True
-
-    if use_global:
-        noise = _fill_from_global()
-    elif asics and all(a in cal for a in asics):
-        for aname in asics:
-            Y0, Y1, X0, X1 = ASIC_SLICES[aname]
-            noise[Y0:Y1+1, X0:X1+1] = cal[aname]["noise"]
-    elif "global" in cal and "noise" in cal["global"]:
-        noise = _fill_from_global()
+    
+    # Get dimensions from calibration
+    if "global" in cal and "noise" in cal["global"]:
+        noise = cal["global"]["noise"].copy()
+        return noise
     else:
-        raise RuntimeError("No noise map found in calibration.")
-
-    return noise
+        raise RuntimeError("No global noise map found in calibration.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -114,21 +77,14 @@ _BAD_PIXEL_DEFAULTS = {
 
 def _build_bad_pixel_mask(
         cal:         dict,
-        asics:       list[str] | None,
         noise_map:   np.ndarray,
         search_mask: np.ndarray | None,
         user_cfg:    dict | None,
 ) -> np.ndarray | None:
     """
-    Assemble a 1024×1024 bad-pixel mask from the dark calibration.
+    Assemble a bad-pixel mask from the dark calibration for single-hybrid.
 
-    Per-ASIC ``n_clipped_per_pixel`` and ``noise`` maps are used where
-    available; if only the global calibration exists, the per-ASIC slices
-    are read from the global maps.  Without any calibration data, the
-    function returns ``None`` (= no bad-pixel filtering applied).
-
-    Set ``bad_pixel_mask.enabled: false`` in the YAML config to disable
-    masking even when the dark calibration provides the relevant maps.
+    For single-hybrid mode, uses the global noise map directly.
     """
     cfg = {**_BAD_PIXEL_DEFAULTS, **(user_cfg or {})}
     if not cfg["enabled"]:
@@ -136,100 +92,33 @@ def _build_bad_pixel_mask(
         return None
 
     print("\nBuilding bad-pixel mask:")
-    mask = np.zeros(noise_map.shape, dtype=bool)
-    targets: list[tuple[str, np.ndarray, np.ndarray | None, np.ndarray]] = []
-
-    if asics:
-        for aname in asics:
-            Y0, Y1, X0, X1 = ASIC_SLICES[aname]
-            sub_active = np.ones((Y1 - Y0 + 1, X1 - X0 + 1), dtype=bool)
-            sub_noise  = noise_map[Y0:Y1+1, X0:X1+1]
-            sub_clip   = (cal.get(aname, {}).get("n_clipped_map")
-                          if cal.get(aname) is not None else None)
-            if sub_clip is None and "global" in cal:
-                sub_clip = cal["global"].get("n_clipped_map")
-                if sub_clip is not None:
-                    sub_clip = sub_clip[Y0:Y1+1, X0:X1+1]
-            targets.append((aname, sub_noise, sub_clip, sub_active))
-    else:
-        global_cal = cal.get("global", {})
-        clip = global_cal.get("n_clipped_map")
-        active = (search_mask if search_mask is not None
-                  else np.ones(noise_map.shape, dtype=bool))
-        targets.append(("global", noise_map, clip, active))
-
-    n_dark_frames = int(cfg.get("n_dark_frames") or 0)
-
-    for tag, sub_noise, sub_clip, sub_active in targets:
-        sub_mask = build_bad_pixel_mask(
-            sub_noise,
-            n_clipped_map     = sub_clip,
-            n_dark_frames     = n_dark_frames,
-            hot_rms_multiple  = float(cfg["hot_rms_multiple"]),
-            cold_rms_fraction = float(cfg["cold_rms_fraction"]),
-            max_clip_fraction = float(cfg["max_clip_fraction"]),
-            active_mask       = sub_active,
-            label             = tag,
-        )
-        if tag == "global":
-            mask = sub_mask
-        else:
-            Y0, Y1, X0, X1 = ASIC_SLICES[tag]
-            mask[Y0:Y1+1, X0:X1+1] = sub_mask
+    
+    active = (search_mask if search_mask is not None
+              else np.ones(noise_map.shape, dtype=bool))
+    
+    clip = None
+    if "global" in cal:
+        clip = cal["global"].get("n_clipped_map")
+    
+    mask = build_bad_pixel_mask(
+        noise_map,
+        n_clipped_map     = clip,
+        n_dark_frames     = int(cfg.get("n_dark_frames") or 0),
+        hot_rms_multiple  = float(cfg["hot_rms_multiple"]),
+        cold_rms_fraction = float(cfg["cold_rms_fraction"]),
+        max_clip_fraction = float(cfg["max_clip_fraction"]),
+        active_mask       = active,
+        label             = "global",
+    )
 
     return mask
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# RAW sub-frame embedding
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _embed_into_full_frame(
-        data:  np.ndarray,
-        asics: list[str],
-) -> np.ndarray:
-    """
-    Embed a sub-frame RAW chunk into a zero-padded 1024×1024 canvas.
-
-    When the RAW file records only a single ASIC (or a subset), each
-    loaded chunk has shape (N, H, W) where H×W < 1024×1024.  All
-    downstream code (_correct_frame, find_events, noise maps, hit maps)
-    assumes 1024×1024 frames, so we place the sub-frame at the correct
-    pixel position before passing it on.
-
-    If the data is already 1024×1024 this function is a no-op.
-    Raises ValueError if the sub-frame shape does not match the ASIC
-    bounding box (catches mismatches between config and file early).
-    """
-    N, H, W = data.shape
-    if H == 1024 and W == 1024:
-        return data
-
-    y0 = min(ASIC_SLICES[a][0] for a in asics)
-    y1 = max(ASIC_SLICES[a][1] for a in asics)
-    x0 = min(ASIC_SLICES[a][2] for a in asics)
-    x1 = max(ASIC_SLICES[a][3] for a in asics)
-    bbox_h = y1 - y0 + 1
-    bbox_w = x1 - x0 + 1
-
-    if H != bbox_h or W != bbox_w:
-        raise ValueError(
-            f"RAW frame shape ({H}×{W}) does not match the bounding box of "
-            f"ASIC(s) {asics} in full-frame coordinates ({bbox_h}×{bbox_w}). "
-            "Check that 'asics' in the config matches the recorded sub-frame."
-        )
-
-    canvas = np.zeros((N, 1024, 1024), dtype=data.dtype)
-    canvas[:, y0:y1+1, x0:x1+1] = data
-    return canvas
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Per-chunk worker
+# Per-chunk worker (single-hybrid)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _make_worker(cal: dict,
-                 asics: list[str] | None,
                  noise_map: np.ndarray,
                  seed_sigma: float,
                  split_sigma: float,
@@ -239,25 +128,16 @@ def _make_worker(cal: dict,
                  sample_buf: list | None = None,
                  sample_max: int = 50):
     """
-    Return a closure suitable for process_frames_mt.
-
-    If sample_buf is a list, up to sample_max corrected frames are appended
-    to it (thread-safe via the list.append GIL) for use in raw spectrum plots.
+    Return a closure suitable for process_frames_mt for single-hybrid mode.
     """
     import threading
     _lock = threading.Lock()
 
     def _worker(raw_chunk: np.ndarray,
                 frame_indices: np.ndarray) -> np.ndarray:
-        # Embed sub-frame RAW data into 1024×1024 if needed.
-        # This is cheap (one zero allocation per chunk) and keeps all
-        # downstream code (ASIC slicing, noise map, find_events) unchanged.
-        if asics and (raw_chunk.shape[1] != 1024 or raw_chunk.shape[2] != 1024):
-            raw_chunk = _embed_into_full_frame(raw_chunk, asics)
-
         chunk_events: list[np.ndarray] = []
         for frame in raw_chunk:
-            corrected = _correct_frame(frame, cal, asics)
+            corrected = _correct_frame(frame, cal)
 
             # Collect sample frames for raw spectrum (cheap copy of one frame)
             if sample_buf is not None:
@@ -279,28 +159,12 @@ def _make_worker(cal: dict,
     return _worker
 
 
-def _correct_frame(raw: np.ndarray,
-                   cal: dict,
-                   asics: list[str] | None) -> np.ndarray:
+def _correct_frame(raw: np.ndarray, cal: dict) -> np.ndarray:
     """
-    Offset subtract + CM correct one raw frame.
-
-    If per-ASIC mode: each ASIC is corrected independently.
-    Otherwise: global offset used on the whole frame.
+    Offset subtract + CM correct one raw frame for single-hybrid.
     """
-    corrected = np.zeros_like(raw, dtype=np.float32)
-
-    if asics:
-        for aname in asics:
-            Y0, Y1, X0, X1 = ASIC_SLICES[aname]
-            sub    = raw[Y0:Y1+1, X0:X1+1].astype(np.float32)
-            offset = cal[aname]["offset"]
-            corr, _ = cm_correct_frame(sub - offset)
-            corrected[Y0:Y1+1, X0:X1+1] = corr
-    else:
-        full = raw.astype(np.float32) - cal["global"]["offset"]
-        corrected, _ = cm_correct_frame(full)
-
+    full = raw.astype(np.float32) - cal["global"]["offset"]
+    corrected, _ = cm_correct_frame(full)
     return corrected
 
 
@@ -373,34 +237,21 @@ def run(cfg: Config) -> dict:
 
     # ── Load calibration ──────────────────────────────────────────────────────
     print(f"\nLoading calibration from: {calibration_path}")
-    cal = _load_cal(calibration_path, asics, prefer=prefer)
+    cal = _load_cal(calibration_path, asics=None, prefer=prefer)
+    
+    # Ensure global calibration exists
+    if "global" not in cal:
+        raise RuntimeError("Calibration must contain 'global' section for single-hybrid mode.")
 
-    # Fill per-ASIC from global slice if missing
-    if asics:
-        for aname in asics:
-            if aname not in cal and "global" in cal:
-                Y0, Y1, X0, X1 = ASIC_SLICES[aname]
-                cal[aname] = {
-                    "offset": cal["global"]["offset"][Y0:Y1+1, X0:X1+1],
-                    "noise":  cal["global"]["noise"][Y0:Y1+1, X0:X1+1],
-                }
-                print(f"  ℹ  {aname}: using global calibration slice")
+    noise_map = _build_noise_map(cal, noise_scope=noise_scope)
+    H, W = noise_map.shape
 
-    noise_map = _build_noise_map(cal, asics, noise_scope=noise_scope)
-
-    # ── Build search mask ─────────────────────────────────────────────────────
+    # ── Build search mask (all pixels active for single-hybrid) ─────────────
     search_mask: np.ndarray | None = None
-    if asics:
-        search_mask = np.zeros((1024, 1024), dtype=bool)
-        for aname in asics:
-            Y0, Y1, X0, X1 = ASIC_SLICES[aname]
-            search_mask[Y0:Y1+1, X0:X1+1] = True
 
     # ── Build bad-pixel mask from calibration ─────────────────────────────────
-    bad_pixel_mask = _build_bad_pixel_mask(cal, asics, noise_map, search_mask,
-                                            sc.get("bad_pixel_mask"))
-    if bad_pixel_mask is not None and search_mask is not None:
-        bad_pixel_mask &= search_mask    # only flag pixels inside the active region
+    bad_pixel_mask = _build_bad_pixel_mask(cal, noise_map=noise_map, search_mask=search_mask,
+                                            user_cfg=sc.get("bad_pixel_mask"))
     if bad_pixel_mask is not None and bool(bad_pixel_mask.any()):
         np.save(out_dir / "bad_pixel_mask.npy", bad_pixel_mask)
 
@@ -425,7 +276,7 @@ def run(cfg: Config) -> dict:
     # Shared across all input files — worker appends to it as frames are processed.
     sample_buf: list = []
 
-    worker = _make_worker(cal, asics, noise_map,
+    worker = _make_worker(cal, noise_map,
                           seed_sigma, split_sigma, reject_extra,
                           search_mask,
                           bad_pixel_mask=bad_pixel_mask,
@@ -519,8 +370,8 @@ def run(cfg: Config) -> dict:
                          (np.zeros(sc["n_bins"], dtype=np.int64), bin_edges))
 
     # ── 2-D maps ──────────────────────────────────────────────────────────────
-    hit_count = np.zeros((1024, 1024), dtype=np.int32)
-    hit_adu   = np.zeros((1024, 1024), dtype=np.float64)
+    hit_count = np.zeros((H, W), dtype=np.int32)
+    hit_adu   = np.zeros((H, W), dtype=np.float64)
     if len(events):
         np.add.at(hit_count,
                   (events["Y"].astype(int), events["X"].astype(int)), 1)

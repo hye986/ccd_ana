@@ -1,49 +1,41 @@
 """
 pnccd_ana.lib.geometry
 ======================
-Shared detector geometry constants for the 1024x1024 pnCCD.
+Detector geometry constants for single-hybrid pnCCD operation.
 
 Array / axis convention
 -----------------------
   data[frame, Y, X]
-    Y = axis 0 = vertical   screen axis     (code: "Y" variable)
-    X = axis 1 = horizontal screen axis     (code: "X" variable)
+    Y = axis 0 = row index = vertical screen axis     (code: "Y" variable)
+    X = axis 1 = column index = horizontal screen axis (code: "X" variable)
 
-  imshow(arr) with origin="lower" maps Y->y, X->x automatically.
+  imshow(arr, origin="lower") maps Y->y, X->x automatically.
   NO transpose needed.
 
   Plot axis labels used throughout:
     x-axis: "X [detector column]"  (horizontal direction)
     y-axis: "Y [detector row]"      (vertical direction)
 
-  Terminology note — two competing conventions live in this file:
-    code's "X" variable = horizontal axis = your "detector column" direction
-    code's "Y" variable = vertical axis   = your "detector row"    direction
-  The physical CM algorithm (median per column) and every result are
-  identical regardless of which word appears on the axis label.
+Rolling shutter
+---------------
+  The sensor reads rows from bottom to top:
+    - First line in RAW file → Y=0 (bottom, with origin="lower")
+    - Last line in RAW file  → Y=H-1 (top)
+  
+  A "row" is a horizontal line (constant Y, all X pixels).
+  Common-mode correction: median over X for each Y row.
 
-ASIC layout  (your table format: Y0 X0 Y1 X1, exclusive end -> stored inclusive)
-------------------------------------------------------------------------------
-  H0: Y 512-1023, X 512-1023  (top-right)
-  H1: Y   0- 511, X 512-1023  (bottom-right)
-  H2: Y   0- 511, X   0- 511  (bottom-left)
-  H3: Y 512-1023, X   0- 511  (top-left)
+Single-hybrid supported sizes
+-----------------------------
+  512×512  — full single ASIC (H=512, W=512)
+  1024×512 — 2 ASICs vertically stacked (H=1024, W=512)
+  Other heights auto-detected via raw_height config.
 
-  Sensor as displayed (origin=lower-left  Y=0 at bottom):
-  Y=1023 +-----------+-----------+
-           |    H3    |    H0     |
-           | (top-lft)|(top-right)|
-  Y= 512 +-----------+-----------+
-           |    H2    |    H1     |
-           |(bot-left)|(bot-right)|
-  Y=   0 +-----------+-----------+
-        X=0         X=512       X=1023
-
-  All plotting calls use origin="lower" explicitly so the sensor appears
-  correct-side-up in saved PNGs.
-
-CM correction:  median over Y  (axis=0 in 2-D, axis=1 in 3-D per-frame input)
-               one CM value per X column; equivalently "median per vertical line".
+  Frame as displayed (origin=lower, Y=0 at bottom):
+                      Y
+                      ↑   H-1 (top)
+                      │
+                      └──X→  0 … W-1
 """
 
 from __future__ import annotations
@@ -51,81 +43,71 @@ from __future__ import annotations
 ADC_MAX   = 65535   # 2^16 - 1
 ADC_RANGE = 65536   # 2^16
 
-DETECTOR_HEIGHT = 1024   # Y axis  (axis 0 in 2-D array)
-DETECTOR_WIDTH  = 1024   # X axis  (axis 1 in 2-D array)
+# Default detector dimensions (updated at runtime from raw file)
+DETECTOR_HEIGHT = 512   # Y axis  (axis 0 in 2-D array)
+DETECTOR_WIDTH  = 512   # X axis  (axis 1 in 2-D array)
 
-# (Y0, Y1, X0, X1) inclusive
-# Y0 = first row (smallest Y index), Y1 = last row (largest Y index)
-# X0 = first column (smallest X index), X1 = last column (largest X index)
-ASIC_SLICES: dict[str, tuple[int, int, int, int]] = {
-    "H0": (512, 1023, 512, 1023),
-    "H1": (  0,  511, 512, 1023),
-    "H2": (  0,  511,   0,  511),
-    "H3": (512, 1023,   0,  511),
-}
+# Single-hybrid: H0 covers the full frame
+# These are kept for backward compatibility but for single-hybrid,
+# the full frame is used (not sliced)
+ALL_ASICS = ["H0"]
+ASIC_LABEL = {"H0": "single-hybrid"}
+ASIC_COLORS = {"H0": "#4e9a9a"}
+ASIC_GRID_POS = {"H0": (0, 0)}
 
-ALL_ASICS = ["H0", "H1", "H2", "H3"]
+# For backward compatibility: H0 = full frame (dimensions set dynamically)
+# This is a module-level variable that gets updated
+ASIC_SLICES: dict[str, tuple[int, int, int, int]] = {}
 
-ASIC_LABEL: dict[str, str] = {
-    "H0": "top-right",
-    "H1": "bottom-right",
-    "H2": "bottom-left",
-    "H3": "top-left",
-}
 
-ASIC_COLORS: dict[str, str] = {
-    "H0": "#e07b39",
-    "H1": "#4e9a9a",
-    "H2": "#7b6fa0",
-    "H3": "#6aaa64",
-}
+def _update_asic_slices(height: int, width: int) -> None:
+    """Update ASIC_SLICES to match frame dimensions."""
+    global ASIC_SLICES
+    ASIC_SLICES["H0"] = (0, height - 1, 0, width - 1)
 
-# matplotlib subplot (row, col) positions for the physical 2x2 ASIC layout.
-# row=0 = top of figure = high Y  (H3 top-left, H0 top-right)
-# col=0 = left of figure = low X  (H3 top-left, H2 bot-left)
-ASIC_GRID_POS: dict[str, tuple[int, int]] = {
-    "H3": (0, 0),
-    "H0": (0, 1),
-    "H2": (1, 0),
-    "H1": (1, 1),
-}
+
+def get_frame_bounds(height: int, width: int) -> tuple[int, int, int, int]:
+    """Return full frame bounds for single-hybrid: (Y0, Y1, X0, X1)."""
+    return (0, height - 1, 0, width - 1)
 
 
 def resolve_asics(asics: list[str] | None) -> list[str] | None:
     """
     Normalise a user-supplied ASIC list.
 
+    For single-hybrid mode, asics parameter is kept for backward compatibility
+    but only H0 is used. Pass asics: [H0] or leave unset for full frame.
+
     Parameters
     ----------
     asics : None / [] -> return None (full-frame mode)
-            ["all"]   -> return ALL_ASICS
-            ["H0", "h1", ...] -> upper-cased, validated
+            ["H0"] or ["h0"] -> return ["H0"]
 
-    Returns None (full-frame) or a non-empty validated list.
+    Returns None (full-frame) or ["H0"] for single ASIC.
     """
     if not asics:
         return None
-    if any(a.lower() == "all" for a in asics):
-        return list(ALL_ASICS)
+    if isinstance(asics, str):
+        asics = [asics]
     result = [a.upper() for a in asics]
-    bad = [a for a in result if a not in ASIC_SLICES]
-    if bad:
-        raise ValueError(f"Unknown ASIC name(s): {bad}.  Valid: {ALL_ASICS}")
-    return result
+    if result == ["H0"]:
+        return ["H0"]
+    # For any other value, treat as full frame
+    return None
 
 
 def split_asics(data, asic_names: list[str]) -> dict[str, object]:
     """
     Extract ASIC sub-arrays from a (n_frames, Y, X) or (Y, X) array.
+    
+    For single-hybrid mode, returns the full array under key "H0".
 
     Returns dict  name -> sub-array  (same ndim as input).
     """
-    import numpy as np
     out: dict[str, object] = {}
     for name in asic_names:
-        Y0, Y1, X0, X1 = ASIC_SLICES[name]
         if data.ndim == 3:
-            out[name] = data[:, Y0:Y1+1, X0:X1+1]
+            out[name] = data
         else:
-            out[name] = data[Y0:Y1+1, X0:X1+1]
+            out[name] = data
     return out

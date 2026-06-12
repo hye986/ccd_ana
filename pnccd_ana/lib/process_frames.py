@@ -57,10 +57,8 @@ def correct_frame(
             # Sub-frame: clip offset to what fits
             frame = frame - off[:frame.shape[0], :frame.shape[1]]
 
-    # Common-mode correction: median over Y for each X column.
-    # This is exactly "subtract the median of all pixels in that row" in
-    # your detector terminology (each "row" = fixed Y = runs vertically;
-    # the pnCCD column electronics give one CM value per horizontal X position).
+    # Common-mode correction: median over X for each Y row.
+    # Rolling shutter reads rows from bottom to top.
     corrected, _ = cm_correct_frame(frame)
     return corrected
 

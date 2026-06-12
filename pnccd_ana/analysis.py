@@ -28,11 +28,11 @@ Key results:
 Algorithms used:
   · Pedestal — "both" (median + sigma-clip) or pick one
   · Sigma-clip — iterative μ ± 3σ reject, up to 20 iterations
-  · Common-mode (CM) — per-column median over all Y rows was applied to the
+  · Common-mode (CM) — per-row median over all X columns was applied to the
     residual (raw − offset) before noise estimation.  This CM correction is
     exactly what "subtract the median value of all pixels in each row from
-    every pixel in that row" describes in pnCCD terms: each vertical column
-    (fixed X) is independent, so median over Y for each X = per-column correction.
+    every pixel in that row" describes in rolling-shutter terms: each horizontal
+    row (fixed Y) is independent, so median over X for each Y = per-row correction.
 
 CLI shortcut:
   python -m pnccd_ana.cli.dark_frame_ana --config your.yaml

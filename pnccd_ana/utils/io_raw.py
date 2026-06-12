@@ -3,24 +3,29 @@ pnccd_ana.utils.io_raw
 ======================
 RAW-format I/O utilities.
 
-Mirrors the public API of io_h5.py so that downstream analysis code can
-switch between HDF5 and RAW data by changing only the import (or by using
-the format-dispatching helpers in io_h5.py).
-
-RAW format recap
-────────────────
+RAW format description
+──────────────────────
   File layout (produced by udp_recorder_hdf5.py):
 
     [8-byte header: b'16BU0000']
     For each frame:
-      [0xFFFF marker (2B)] [ADC counter (4B)] [H × uint16 pixels]   ← first column
-      [0xFFFE marker (2B)] [ADC counter (4B)] [H × uint16 pixels]   ← remaining columns
+      [0xFFFF marker (2B)] [ADC counter (4B)] [W × uint16 pixels]   ← first row
+      [0xFFFE marker (2B)] [ADC counter (4B)] [W × uint16 pixels]   ← remaining rows
       ...
 
-  Each record encodes one readout column (height H pixels).
-  The number of records per frame equals the frame width W.
+  Each record encodes one readout ROW (W pixels per row).
+  The number of records per frame equals the frame height H.
   Geometry (H, W) is auto-detected from the marker pattern; pass height
   explicitly for non-standard or ROI sizes.
+
+  Supported frame sizes for single-hybrid:
+    - 512×512  (H=512 rows, W=512 pixels per row)
+    - 1024×512 (H=1024 rows, W=512 pixels per row)
+    - Other heights auto-detected (128, 256, 512, 1024, 2048, 4096)
+
+  Array layout after reading: data[frame, Y, X]
+    - Y = row index = 0..H-1 (first row in file = Y=0 = bottom with origin="lower")
+    - X = column index = 0..W-1
 
 RAW files carry no per-frame metadata (no frame32 counter, no timestamp,
 no completeness flag).  All frames are therefore treated as complete.
@@ -82,15 +87,27 @@ def _record_dtype(height: int) -> np.dtype:
 
 def _try_geometry(path: str | Path, data_bytes: int,
                   candidate_h: int, expected_width: int | None) -> dict | None:
-    """Return geometry dict if candidate_h is consistent with the file, else None."""
-    record_size = 6 + candidate_h * 2
+    """
+    Return geometry dict if candidate_h is consistent with the file, else None.
+    
+    Records are rows: each record has W pixels, H records per frame.
+    File: [header] [record0][record1]...[recordH-1][recordH]... (no gaps)
+    """
+    # Detect width W from first record
+    w = _detect_width_from_first_record(path)
+    if w is None:
+        return None
+    if expected_width is not None and w != expected_width:
+        return None
+    
+    record_size = 6 + w * 2
     if data_bytes % record_size != 0:
         return None
     n_records = data_bytes // record_size
     if n_records == 0:
         return None
 
-    dtype = _record_dtype(candidate_h)
+    dtype = _record_dtype(w)
     recs  = np.memmap(path, dtype=dtype, mode="r", offset=8, shape=(n_records,))
     markers = np.asarray(recs["marker"])
     adcs    = np.asarray(recs["adc"])
@@ -104,9 +121,17 @@ def _try_geometry(path: str | Path, data_bytes: int,
     if len(frame_starts) == 0 or frame_starts[0] != 0:
         return None
 
+    # Height H = records per frame (rows per frame)
     if len(frame_starts) == 1:
-        records_per_frame = n_records
+        # Only one frame marker at start — infer H from total records
+        # This works for single-frame files or when H is unknown
+        if n_records == candidate_h:
+            records_per_frame = n_records
+        else:
+            # Try to find H from candidate list
+            return None
     else:
+        # Multiple frames — H is the gap between frame markers
         gaps = np.diff(frame_starts)
         if not np.all(gaps == gaps[0]):
             return None
@@ -117,17 +142,37 @@ def _try_geometry(path: str | Path, data_bytes: int,
     if not np.array_equal(frame_starts,
                           np.arange(0, n_records, records_per_frame)):
         return None
-    if expected_width is not None and records_per_frame != expected_width:
+    if candidate_h is not None and records_per_frame != candidate_h:
         return None
 
     return {
-        "height":      int(candidate_h),
-        "width":       int(records_per_frame),
+        "height":      int(records_per_frame),
+        "width":       int(w),
         "n_frames":    int(len(frame_starts)),
         "n_records":   int(n_records),
         "record_size": int(record_size),
         "dtype":       dtype,
     }
+
+
+def _detect_width_from_first_record(path: str | Path) -> int | None:
+    """
+    Detect frame width W by reading the first record after the 8-byte header.
+    Returns None if the file is too short or invalid.
+    """
+    with open(path, "rb") as fh:
+        fh.read(8)  # skip header
+        # Read enough for one record: try common widths
+        for w in (256, 512, 768, 1024):
+            record_size = 6 + w * 2
+            fh.seek(8)
+            data = fh.read(record_size)
+            if len(data) < record_size:
+                continue
+            marker = int.from_bytes(data[0:2], "little")
+            if marker in (_FRAME_MARKER, _LINE_MARKER):
+                return w
+    return None
 
 
 def detect_raw_geometry(
@@ -218,16 +263,19 @@ class _RawStore:
         Return frames for the given indices as float32 (N, H, W).
 
         Indices must be in [0, n_frames).  Order is preserved.
+        
+        Records are rows: each record contains W pixels. 
+        Frame i starts at record i*H and contains H consecutive rows.
         """
         W  = self.width
         H  = self.height
         n  = len(indices)
         out = np.empty((n, H, W), dtype=np.float32)
         for i, fi in enumerate(indices):
-            rec_start = int(fi) * W
-            pix = np.asarray(self._recs[rec_start : rec_start + W]["pix"])
-            # pix shape: (W, H)  →  transpose to (H, W)
-            out[i] = pix.T.astype(np.float32)
+            rec_start = int(fi) * H
+            # Each record is one row of W pixels; stack H rows into frame
+            rows = [np.asarray(self._recs[rec_start + r]["pix"]) for r in range(H)]
+            out[i] = np.stack(rows, axis=0).astype(np.float32)
         return out
 
 

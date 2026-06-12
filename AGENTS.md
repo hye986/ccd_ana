@@ -20,18 +20,20 @@ data[frame, Y, X]        axis 0 = Y = vertical on screen  (detector "row")
 imshow(arr, origin="lower")  Y=0 at bottom, X=0 at left
 ```
 
-Your team's terminology:
-- "row" = x-axis = vertical   = code's Y variable  ← same
-- "column" = y-axis = horizontal = code's X variable ← same
+**Rolling shutter**: sensor reads rows from bottom to top:
+- First line in RAW file → Y=0 (bottom, with origin="lower")
+- A "row" is a horizontal line (constant Y, all X pixels)
+- Common-mode correction: median over X for each Y row
 
-ASIC layout (your table format Y0 X0 Y1 X1, exclusive → stored inclusive):
+**Terminology (now consistent):**
+- "row" = horizontal line = code's Y variable = constant Y, all X
+- "column" = vertical line = code's X variable = constant X, all Y
+
+## Single-hybrid supported sizes
 ```
-H0: Y=[512,1023] X=[512,1023]  top-right
-H1: Y=[  0, 511] X=[512,1023]  bottom-right
-H2: Y=[  0, 511] X=[  0, 511]  bottom-left
-H3: Y=[512,1023] X=[  0, 511]  top-left
+512×512  — H=512 rows, W=512 columns
+1024×512 — H=1024 rows, W=512 columns (2 ASICs vertically stacked)
 ```
-All plotting uses `origin="lower"` so sensor appears correct-side-up.
 
 ## What the package does (4 stages)
 
@@ -69,9 +71,9 @@ All plotting uses `origin="lower"` so sensor appears correct-side-up.
 pnccd_ana/
   analysis.py          ← START HERE: explains all 4 stages with examples
   lib/
-    geometry.py         ← ASIC bounds, grid positions, axis convention
+    geometry.py         ← frame dimensions, axis convention
     pedestal.py         ← median + sigma-clip offset computation
-    common_mode.py      ← per-column median CM correction
+    common_mode.py      ← per-row median CM correction (median over X for each Y)
     noise.py            ← pixel noise + build_bad_pixel_mask()
     pattern_recognition ← seed → pattern → grade (C + Python)
     process_frames.py   ← correct_frame, make_worker, process_frames_mt

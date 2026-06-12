@@ -163,9 +163,9 @@ def plot_cm_map(scope_name: str, cm_map: np.ndarray, out_dir: Path) -> None:
     fig.suptitle(f"Common-Mode Correction — {scope_name}", fontsize=13, fontweight="bold")
 
     vext = float(np.percentile(np.abs(cm_map), 99))
-    im = axes[0].imshow(cm_map.T, origin="lower", cmap="RdBu_r",
+    im = axes[0].imshow(cm_map, origin="lower", cmap="RdBu_r",
                          vmin=-vext, vmax=vext, aspect="auto")
-    axes[0].set_xlabel("Frame index"); axes[0].set_ylabel("X (detector row)")
+    axes[0].set_xlabel("Y [detector row]"); axes[0].set_ylabel("Frame index")
     axes[0].set_title("CM Value per (Frame, Detector Row)")
     _cb(axes[0], im)
 

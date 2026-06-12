@@ -32,92 +32,24 @@ from ..utils  import (save_calibration_h5, save_calibration_npy,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# RAW sub-frame embedding
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _embed_into_full_frame(
-        data:   np.ndarray,
-        asics:  list[str],
-        label:  str = "",
-) -> np.ndarray:
-    """
-    Embed a sub-frame RAW array into a zero-padded 1024×1024 canvas.
-
-    When a RAW file contains data for only one ASIC (or a subset), the
-    loaded frames have shape (N, H, W) where H×W < 1024×1024.  All
-    downstream analysis (geometry slicing, noise maps, hit maps, etc.)
-    assumes 1024×1024 frames, so we place the sub-frame data at the
-    correct pixel position within a full-size canvas.
-
-    The target region is determined by the bounding box of the requested
-    ASICs according to ASIC_SLICES.  If the data shape already matches
-    1024×1024 this function is a no-op.
-
-    Parameters
-    ----------
-    data  : (N, H, W) float32 array as loaded from the RAW file
-    asics : ASIC names that were recorded (e.g. ['H1'])
-    label : string used in the printed message only
-
-    Returns
-    -------
-    (N, 1024, 1024) float32 array, or the original array if already full-size
-    """
-    N, H, W = data.shape
-    if H == 1024 and W == 1024:
-        return data                          # already full-size, nothing to do
-
-    # Compute the bounding box of all requested ASICs in full-frame coordinates
-    y0 = min(ASIC_SLICES[a][0] for a in asics)
-    y1 = max(ASIC_SLICES[a][1] for a in asics)
-    x0 = min(ASIC_SLICES[a][2] for a in asics)
-    x1 = max(ASIC_SLICES[a][3] for a in asics)
-    bbox_h = y1 - y0 + 1
-    bbox_w = x1 - x0 + 1
-
-    if H != bbox_h or W != bbox_w:
-        raise ValueError(
-            f"RAW frame shape ({H}×{W}) does not match the bounding box of "
-            f"ASIC(s) {asics} in full-frame coordinates ({bbox_h}×{bbox_w}). "
-            "Check that 'asics' in the config matches the recorded sub-frame."
-        )
-
-    canvas = np.zeros((N, 1024, 1024), dtype=data.dtype)
-    canvas[:, y0:y1+1, x0:x1+1] = data
-    tag = f" [{label}]" if label else ""
-    print(f"  Embedded{tag} {H}×{W} RAW sub-frame → 1024×1024 "
-          f"at rows {y0}:{y1+1}, cols {x0}:{x1+1}")
-    return canvas
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Per-scope analysis (full frame or one ASIC)
+# Per-scope analysis (single-hybrid)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _analyse_scope(data:        np.ndarray,
                    label:       str,
                    methods:     list[str],
                    n_sigma:     float,
-                   out_dir:     Path,
-                   pixel_mask:  np.ndarray | None = None) -> dict:
+                   out_dir:     Path) -> dict:
     """
-    Run pedestal → CM → noise pipeline for one data block.
+    Run pedestal → CM → noise pipeline for one data block (single-hybrid).
 
     Parameters
     ----------
-    data       : (N, H, W) float32 array — always 3-D, always the full
-                 1024×1024 canvas (or a pre-sliced ASIC sub-array)
+    data       : (N, H, W) float32 array — frames from RAW file
     label      : scope name used in prints and filenames
     methods    : ['median'], ['sigclip'], or both
     n_sigma    : sigma-clip threshold
     out_dir    : output directory
-    pixel_mask : optional boolean (H, W) array; True = active pixel.
-                 When set (sub-frame RAW input embedded into 1024×1024),
-                 the analysis is run on the tight bounding-box sub-volume
-                 so that zero-padded inactive regions are excluded from
-                 all pedestal, CM, and noise calculations.  The resulting
-                 2-D maps are re-expanded to (H, W) = (1024, 1024) with
-                 zeros outside the active region before plotting.
 
     Returns dict with keys: offset_median?, offset_sigclip?,
                              noise, cm_noise, n_clipped_map?,
@@ -127,21 +59,6 @@ def _analyse_scope(data:        np.ndarray,
     r: dict       = {}
     keep_mask     = None
     n_clipped_map = None
-
-    # When a pixel_mask is provided (sub-frame RAW embedded in 1024×1024),
-    # slice out the tight bounding box of active pixels as a proper 3-D
-    # sub-volume.  All lib functions (pedestal, CM, noise) receive a clean
-    # (N, bbox_H, bbox_W) array with no zero-padded rows or columns that
-    # could bias column medians or noise estimates.
-    bbox_slices = None   # (slice_Y, slice_X) used for re-expansion later
-    full_shape  = data.shape[1:]   # (H, W) of the canvas before any slicing
-    if pixel_mask is not None:
-        rows = np.any(pixel_mask, axis=1)
-        cols = np.any(pixel_mask, axis=0)
-        y0, y1 = int(np.argmax(rows)),  int(len(rows) - 1 - np.argmax(rows[::-1]))
-        x0, x1 = int(np.argmax(cols)),  int(len(cols) - 1 - np.argmax(cols[::-1]))
-        bbox_slices = (slice(y0, y1 + 1), slice(x0, x1 + 1))
-        data = data[:, bbox_slices[0], bbox_slices[1]]   # (N, bbox_H, bbox_W)
 
     if "median" in methods:
         r["offset_median"] = compute_offset_median(data, label)
@@ -156,22 +73,6 @@ def _analyse_scope(data:        np.ndarray,
     r["cm_noise"]       = compute_cm_noise(cm_map, label)
     r["cm_map"]         = cm_map
     r["data_corrected"] = corrected
-
-    # Re-expand 2-D result maps from bbox back to full canvas size so that
-    # all plotting functions receive the expected (H, W) shape.
-    # Inactive pixels stay zero (plotted as background / masked).
-    if bbox_slices is not None:
-        H, W = full_shape
-        def _expand(arr: np.ndarray) -> np.ndarray:
-            if arr is None or arr.ndim != 2:
-                return arr
-            canvas = np.zeros((H, W), dtype=arr.dtype)
-            canvas[bbox_slices[0], bbox_slices[1]] = arr
-            return canvas
-        for key in ("offset_median", "offset_sigclip",
-                    "noise", "cm_noise", "n_clipped_map"):
-            if key in r:
-                r[key] = _expand(r[key])
 
     scope_dir = out_dir / label
     scope_dir.mkdir(parents=True, exist_ok=True)
@@ -289,33 +190,14 @@ def run(cfg: Config) -> dict:
           f"({data_raw.shape[1]} × {data_raw.shape[2]} pixels)"
           f"  from {len(run_files)} file(s)")
 
-    # ── Embed sub-frame RAW data into 1024×1024 canvas if needed ─────────────
-    # All downstream code (split_asics, ASIC_SLICES, plotting) assumes 1024×1024.
-    # If the RAW file is a single-ASIC or partial readout, place it at the
-    # correct pixel position and zero-pad the rest.
-    # Also build a boolean mask of the active (recorded) pixels so that the
-    # global analysis ignores the zero-padded regions in statistics and plots.
-    global_mask = None   # None → all pixels active (full 1024×1024 input)
-    if dc["data_format"] == "raw" and asics:
-        orig_h, orig_w = data_raw.shape[1], data_raw.shape[2]
-        data_raw = _embed_into_full_frame(data_raw, asics)
-        if orig_h < 1024 or orig_w < 1024:
-            # Mark only the pixels that actually contain recorded data.
-            # The bounding box is the union of all configured ASICs.
-            y0 = min(ASIC_SLICES[a][0] for a in asics)
-            y1 = max(ASIC_SLICES[a][1] for a in asics)
-            x0 = min(ASIC_SLICES[a][2] for a in asics)
-            x1 = max(ASIC_SLICES[a][3] for a in asics)
-            global_mask = np.zeros((1024, 1024), dtype=bool)
-            global_mask[y0:y1+1, x0:x1+1] = True
+    # Update ASIC slices to match detected frame dimensions
+    from ..lib.geometry import _update_asic_slices
+    _update_asic_slices(data_raw.shape[1], data_raw.shape[2])
 
     # ── Full-frame analysis ───────────────────────────────────────────────────
-    # global_mask restricts the analysis to recorded pixels when the input is
-    # a sub-frame RAW file; it is None (= no restriction) for full 1024×1024 inputs.
     all_results: dict = {"asics": {}}
     all_results["global"] = _analyse_scope(
-        data_raw, "global", methods, n_sigma, out_dir,
-        pixel_mask=global_mask)
+        data_raw, "global", methods, n_sigma, out_dir)
 
     # ── Per-ASIC analysis ─────────────────────────────────────────────────────
     if asics:
