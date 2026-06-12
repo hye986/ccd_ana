@@ -16,17 +16,15 @@ from pathlib import Path
 import numpy as np
 
 from ..config import Config
-from ..lib    import (find_events, resolve_asics,
-                       ASIC_SLICES, ALL_ASICS, N_GRADES, EVENT_DTYPE,
+from ..lib    import (find_events,
+                       N_GRADES, EVENT_DTYPE,
                        build_bad_pixel_mask)
 from ..lib.common_mode import cm_correct_frame
 from ..utils  import (load_calibration_h5, load_calibration_npy,
                        save_events_h5,
-                       plot_hitmap, plot_asic_hitmaps,
-                       plot_spectrum, plot_asic_spectra,
+                       plot_hitmap, plot_spectrum,
                        plot_grade_distribution,
-                       plot_raw_spectrum, plot_raw_spectrum_per_asic,
-                       plot_spectrum_comparison)
+                       plot_raw_spectrum)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -429,29 +427,10 @@ def run(cfg: Config) -> dict:
             plot_raw_spectrum(
                 corrected_frames=sample_arr,
                 noise_map=noise_map,
-                offset_map=(cal.get("global") or next(iter(cal.values())))["offset"],
-                raw_frames=None,
                 bin_edges=bin_edges,
                 out_dir=out_dir,
                 seed_sigma=seed_sigma,
-                asic_mask=search_mask,
                 title_suffix="global",
-            )
-
-    if asics and gen["save_asic_plots"]:
-        plot_asic_hitmaps(hit_count, asics, out_dir)
-        if len(events):
-            plot_asic_spectra(events, bin_edges, asics, out_dir)
-        if sample_buf:
-            sample_arr = np.stack(sample_buf, axis=0)
-            plot_raw_spectrum_per_asic(
-                corrected_frames=sample_arr,
-                noise_map=noise_map,
-                raw_frames=None,
-                bin_edges=bin_edges,
-                asics=asics,
-                out_dir=out_dir,
-                seed_sigma=seed_sigma,
             )
 
     print(f"\n✓ Source analysis complete.  Output: {out_dir}/")
