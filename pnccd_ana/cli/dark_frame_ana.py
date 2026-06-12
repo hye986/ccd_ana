@@ -26,9 +26,7 @@ from ..lib    import (compute_offset_median,
                        resolve_asics, split_asics,
                        ASIC_SLICES, ALL_ASICS)
 from ..utils  import (save_calibration_h5, save_calibration_npy,
-                       plot_offsets, plot_noise,
-                       plot_cm_map, plot_asic_overview,
-                       plot_summary_dashboard)
+                       plot_offsets, plot_noise, plot_cm_map)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -206,20 +204,7 @@ def run(cfg: Config) -> dict:
             all_results["asics"][aname] = _analyse_scope(
                 asic_data[aname], aname, methods, n_sigma, out_dir)
 
-        if gen["save_asic_plots"]:
-            for qty, title, lbl, cmap, log in [
-                ("offset_median",  "Median Offset",     "ADU",     "viridis", False),
-                ("offset_sigclip", "SigmaClip Offset",  "ADU",     "plasma",  False),
-                ("noise",          "Pixel Noise (RMS)", "ADU RMS", "inferno", False),
-                ("noise",          "Pixel Noise (log)", "ADU RMS", "inferno", True),
-            ]:
-                plot_asic_overview(all_results["asics"], qty, title, lbl,
-                                   cmap, out_dir, log_scale=log)
-
-    # ── Summary ───────────────────────────────────────────────────────────────
-    plot_summary_dashboard(all_results["global"], out_dir)
-
-    # ── Save results ──────────────────────────────────────────────────────────
+        # ── Save results ──────────────────────────────────────────────────────────
     def _strip(r: dict) -> dict:
         return {k: v for k, v in r.items()
                 if k not in ("cm_map", "data_corrected", "keep_mask")}
