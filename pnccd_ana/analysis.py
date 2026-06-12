@@ -28,7 +28,6 @@ Key results:
 Algorithms used:
   · Pedestal — "both" (median + sigma-clip) or pick one
   · Sigma-clip — iterative μ ± 3σ reject, up to 20 iterations
-  · ADC rollover flag — pixel-frame value < 10% AND pixel median > 80% of ADC range
   · Common-mode (CM) — per-column median over all Y rows was applied to the
     residual (raw − offset) before noise estimation.  This CM correction is
     exactly what "subtract the median value of all pixels in each row from

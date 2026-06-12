@@ -4,8 +4,7 @@ from .geometry            import (ASIC_SLICES, ALL_ASICS, ASIC_LABEL,
                                    resolve_asics, split_asics,
                                    ADC_MAX, ADC_RANGE,
                                    DETECTOR_HEIGHT, DETECTOR_WIDTH)
-from .pedestal            import (detect_and_unwrap_rollover,
-                                   compute_offset_median,
+from .pedestal            import (compute_offset_median,
                                    compute_offset_sigma_clip)
 from .common_mode         import (cm_correct_frame,
                                    apply_common_mode_correction,

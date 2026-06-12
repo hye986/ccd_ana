@@ -55,43 +55,6 @@ def _asic_guides(ax):
 # Dark-frame calibration plots
 # ──────────────────────────────────────────────────────────────────────────────
 
-def plot_rollover(data_raw: np.ndarray, rollover: np.ndarray,
-                  out_dir: Path) -> None:
-    """Rollover diagnostic: event map, raw-median image, ADU histogram."""
-    rollover_count = rollover.sum(axis=0)
-    pmed           = np.median(data_raw, axis=0)
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle("ADC Rollover Diagnostics", fontsize=13, fontweight="bold")
-
-    im0 = axes[0].imshow(rollover_count, origin="lower", cmap="hot", aspect="auto")
-    axes[0].set_title("Rollover Count per Pixel")
-    axes[0].set_xlabel("X (detector row)"); axes[0].set_ylabel("Y (detector column)")
-    _cb(axes[0], im0, "# frames")
-
-    vmin, vmax = np.percentile(pmed, [1, 99])
-    im1 = axes[1].imshow(pmed, origin="lower", cmap="viridis",
-                          vmin=vmin, vmax=vmax, aspect="auto")
-    axes[1].set_title("Pixel Median (raw) — bimodal → rollover")
-    axes[1].set_xlabel("X (detector row)"); axes[1].set_ylabel("Y (detector column)")
-    _cb(axes[1], im1)
-
-    axes[2].hist(pmed.ravel(), bins=300, range=(0, ADC_MAX),
-                 color="gray", edgecolor="none", alpha=0.8)
-    axes[2].axvline(0.10*ADC_MAX, color="red",  lw=1.2, ls="--",
-                    label=f"10% ({0.10*ADC_MAX:.0f} ADU)")
-    axes[2].axvline(0.80*ADC_MAX, color="blue", lw=1.2, ls="--",
-                    label=f"80% ({0.80*ADC_MAX:.0f} ADU)")
-    axes[2].set_xlabel("Pixel median (ADU)"); axes[2].set_ylabel("Pixel count")
-    axes[2].set_title("Median distribution — bimodal → rollover")
-    axes[2].legend(fontsize=8); axes[2].grid(axis="y", alpha=0.3)
-
-    plt.tight_layout()
-    p = out_dir / "rollover_diagnostics.png"
-    fig.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig)
-    print(f"  → {p}")
-
-
 def plot_offsets(scope_name: str, r: dict, out_dir: Path) -> None:
     """2-D offset maps + histograms for both/either method."""
     present = []

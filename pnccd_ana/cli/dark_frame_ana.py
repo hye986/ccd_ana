@@ -18,8 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import Config
-from ..lib    import (detect_and_unwrap_rollover,
-                       compute_offset_median,
+from ..lib    import (compute_offset_median,
                        compute_offset_sigma_clip,
                        apply_common_mode_correction,
                        compute_noise,
@@ -28,7 +27,7 @@ from ..lib    import (detect_and_unwrap_rollover,
                        ASIC_SLICES, ALL_ASICS)
 from ..utils  import (get_io_module,
                        save_calibration_h5, save_calibration_npy,
-                       plot_rollover, plot_offsets, plot_noise,
+                       plot_offsets, plot_noise,
                        plot_cm_map, plot_asic_overview,
                        plot_summary_dashboard)
 
@@ -306,31 +305,17 @@ def run(cfg: Config) -> dict:
             global_mask = np.zeros((1024, 1024), dtype=bool)
             global_mask[y0:y1+1, x0:x1+1] = True
 
-    # ── Rollover ──────────────────────────────────────────────────────────────
-    rollover_mask = None
-    if dc["rollover_check"]:
-        data_work, rollover_mask = detect_and_unwrap_rollover(
-            data_raw,
-            low_frac=dc["rollover_low_frac"],
-            high_frac=dc["rollover_high_frac"],
-            unwrap=dc["unwrap_rollover"],
-        )
-        if gen["save_frame_plots"]:
-            plot_rollover(data_raw, rollover_mask, out_dir)
-    else:
-        data_work = data_raw
-
     # ── Full-frame analysis ───────────────────────────────────────────────────
     # global_mask restricts the analysis to recorded pixels when the input is
     # a sub-frame RAW file; it is None (= no restriction) for full 1024×1024 inputs.
     all_results: dict = {"asics": {}}
     all_results["global"] = _analyse_scope(
-        data_work, "global", methods, n_sigma, out_dir,
+        data_raw, "global", methods, n_sigma, out_dir,
         pixel_mask=global_mask)
 
     # ── Per-ASIC analysis ─────────────────────────────────────────────────────
     if asics:
-        asic_data = split_asics(data_work, asics)
+        asic_data = split_asics(data_raw, asics)
         for aname in asics:
             all_results["asics"][aname] = _analyse_scope(
                 asic_data[aname], aname, methods, n_sigma, out_dir)
