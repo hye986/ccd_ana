@@ -12,7 +12,6 @@ Config file format (YAML)
     # Shared settings (used by both dark_frames and source_spectrum):
     raw_height: 512              # RAW frame height (auto-detected if null)
     raw_width: null              # RAW frame width (consistency check; optional)
-    asics: [H0]                  # ASIC(s) to analyse
     n_workers: 8                 # parallel workers
     chunk_size: 64               # frames per chunk
     max_frames: null             # null = all frames
@@ -79,7 +78,6 @@ _DEFAULTS: dict[str, Any] = {
         # Shared settings (used by both dark_frames and source_spectrum):
         "raw_height":       None,          # RAW frame height (auto-detected if None)
         "raw_width":        None,          # RAW frame width (consistency check; optional)
-        "asics":            None,          # ASIC(s) to analyse
         "n_workers":        8,             # parallel workers
         "chunk_size":       64,            # frames per chunk
         "max_frames":       None,          # null = all
@@ -278,7 +276,6 @@ general:
   # Shared settings (used by both dark_frames and source_spectrum):
   raw_height: 512                   # RAW frame height (auto-detected if null)
   raw_width: null                   # RAW frame width (consistency check; null = auto)
-  asics: [H0]                       # ASIC(s) to analyse
   n_workers: 8                      # parallel workers
   chunk_size: 64                    # frames per chunk
   max_frames: null                  # null = all frames
