@@ -11,7 +11,7 @@ Stage 1 — Dark frame calibration
 ──────────────────────────────────
 Purpose  : Measure per-pixel electronic offset and noise from dark frames
           (frames with no source illuminating the sensor).
-Inputs  : dark_run.h5  or  dark_run.raw   shape (N, 1024, 1024) uint16
+Inputs  : dark_run.raw   shape (N, H, W) uint16 (single hybrid: H×W can be 512×512, 1024×512, etc.)
 Outputs : run0001/dark_calibration.h5
           ├── asics/H{0,1,2,3}/
           │   ├── offset/median       (512, 512) float32
@@ -19,7 +19,7 @@ Outputs : run0001/dark_calibration.h5
           │   ├── noise/pixel_rms     (512, 512) float32
           │   ├── noise/cm_rms        (512, 512) float32
           │   └── noise/n_clipped     (512, 512) float32
-          └── global/                 same maps, full 1024×1024
+          └── global/                 same maps, full H×W (single hybrid)
 
 Key results:
   offset (float32)  : μ per pixel — subtract from each raw frame pixel
@@ -41,8 +41,8 @@ Stage 2 — Noise map and bad-pixel mask from calibration
 ────────────────────────────────────────────────────────
 Purpose  : Derive per-pixel noise RMS and an optional bad-pixel mask.
 Inputs   : dark_calibration.h5
-Outputs  : noise_map                                        (1024, 1024) float32
-           bad_pixel_mask | None                           (1024, 1024) bool
+Outputs  : noise_map                                        (H, W) float32
+           bad_pixel_mask | None                           (H, W) bool
 
   Bad-pixel criteria (a pixel is bad when ANY of these holds):
     HOT      : noise > hot_rms_multiple  × median(active_noise) → fires false seeds
@@ -56,14 +56,14 @@ Outputs  : noise_map                                        (1024, 1024) float32
 Stage 3 — Source: offset → CM → event recognition
 ─────────────────────────────────────────────────
 Purpose  : Turn raw voltage frames into photon-event lists.
-Inputs   : source_run.h5  or  source_run.raw   shape (N, 1024, 1024) uint16
+Inputs   : source_run.raw   shape (N, H, W) uint16 (single hybrid: H×W can be 512×512, 1024×512, etc.)
            dark_calibration.h5
-           noise_map                                   (1024, 1024) float32
-           search_mask    | None                       (1024, 1024) bool
-           bad_pixel_mask | None                      (1024, 1024) bool
+           noise_map                                   (H, W) float32
+           search_mask    | None                       (H, W) bool
+           bad_pixel_mask | None                      (H, W) bool
            seed_sigma = 5.0,  split_sigma = 3.0       (threshold multipliers)
 Outputs  : events structured array 1-D with fields:
-             Y, X    — coordinates (Y=row 0..1023, X=col 0..1023)
+             Y, X    — coordinates (Y=row 0..H-1, X=col 0..W-1)
              grade   — 0=single, 1-4=double, 5-8=triple, 9-12=quad, 13=other
              adu_sum — total charge in all pattern pixels
              adu_seed — charge at the centre pixel
@@ -126,15 +126,18 @@ Array / axis convention — read before you plot
     axis 0 = Y = row index = VERTICAL direction on screen = "detector row" axis
     axis 1 = X = col index = HORIZONTAL direction on screen = "detector column" axis
 
-    The pnCCD sensor has 4 ASICs (hybrids), each 512×512 pixels:
-      H3 (top-left) │ H0 (top-right)
-      ──────────────┼──────────────
-      H2 (bot-left) │ H1 (bot-right)
+    The pnCCD sensor has 4 ASICs (hybrids), each 512×512 pixels, but this
+    version is configured for SINGLE HYBRID operation. Supported frame sizes:
+      - 512×512  (full single ASIC)
+      - 1024×512 (2 ASICs vertically stacked)
+      - Other heights supported via raw_height config option
+
+      H0 (top-right) — single ASIC readout
                           Y
-                          ↑   0 … 511 … 1023  (Y increases going down-screen if
+                          ↑   0 … H-1  (Y increases going down-screen if
                           │                 origin=upper = imshow default)
                           │   This analysis uses origin="lower" everywhere,
-                          └──X→  0 … 511 … 1023  so Y=0 is at the BOTTOM of
+                          └──X→  0 … W-1  so Y=0 is at the BOTTOM of
                                                    the figure (readout is at
                                                    the bottom of the sensor).
 
@@ -144,7 +147,7 @@ Array / axis convention — read before you plot
   Your team uses "row = x-axis = vertical" exactly matching what the Y
   variable represents.  There is a naming conflict with older docstrings
   that called X "detector row" — those labels are now superseded.
-  The coordinate (Y=512, X=0) lands in H3 (top-left ASIC) in all plots.
+  The coordinate (Y=H//2, X=W//2) lands in the center of the single ASIC.
 
 
 ═════════════════════════════════════════════════════════════════════════════
@@ -155,9 +158,9 @@ Stage 1 — dark calibration
 ───────────────────────────────────
 >>> from pnccd_ana.analysis import run_dark_calibration
 >>> run_dark_calibration(
-...     "dark_run.h5",
+...     "dark_run.raw",          # RAW 512x512 format
 ...     output_dir="run0001",
-...     asics=["H1"],             # or ["H0","H1","H2","H3"]
+...     asics=["H0"],            # single ASIC (H0, H1, H2, or H3)
 ...     pedestal_method="both",
 ... )
 #  →  run0001/dark_calibration.h5
@@ -165,8 +168,8 @@ Stage 1 — dark calibration
 Stage 2 — noise map + bad-pixel mask
 ───────────────────────────────────
 >>> from pnccd_ana.analysis import load_calibration, build_noise_map, build_bad_pixel_mask
->>> cal = load_calibration("run0001/dark_calibration.h5", asics=["H1"])
->>> noise = build_noise_map(cal, asics=["H1"])
+>>> cal = load_calibration("run0001/dark_calibration.h5", asics=["H0"])
+>>> noise = build_noise_map(cal, asics=["H0"])
 >>> bad = build_bad_pixel_mask(
 ...     noise,
 ...     n_clipped_map=cal["noise"]["n_clipped"],
@@ -180,14 +183,14 @@ Stage 2 — noise map + bad-pixel mask
 Stage 3 — process source frames (batch, no CLI)
 ─────────────────────────────────────────────
 >>> from pnccd_ana.analysis import load_raw_h5, process_frames
->>> raw = load_raw_h5("fe55_run.h5", max_frames=50000)
+>>> raw = load_raw_h5("fe55_run.raw", max_frames=50000)  # RAW format
 >>> evts = process_frames(
 ...     raw,
 ...     cal,
 ...     noise,
 ...     seed_sigma=5.0,
 ...     split_sigma=3.0,
-...     asics=["H1"],
+...     asics=["H0"],            # single ASIC
 ...     bad_pixel_mask=bad,
 ... )
 >>> print(f"{len(evts):,} events")

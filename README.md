@@ -1,4 +1,6 @@
-# fsp_offAna
+# pnccd_ana
+
+Single-hybrid pnCCD analysis for Fe-55 source characterization.
 
 
 ## Quickstart
@@ -36,43 +38,37 @@ python -m pnccd_ana.cli.source_ana analysis.yaml
 ```
 
 
-### Use cases with different input format
+### Configuration
 
-Case 1 — HDF5, full frame, analyse H1 only
+**Path resolution:**
+- `general.data_dir` — base directory for input files (default: `.`)
+- `general.output_dir` — base directory for output files (default: `output`)
+- Input paths are resolved relative to `data_dir`
+- Output paths are resolved relative to `output_dir`
 
-yaml
+**Example structure:**
+```yaml
+general:
+  data_dir: /path/to/raw/data
+  output_dir: ./results
 
-```
 dark_frames:
-  dark_run_file: dark_run.h5
-  data_format: h5
-  asics: [H1]
+  dark_run_file: dark_run.raw   # resolves to /path/to/raw/data/dark_run.raw
+  raw_height: 512               # or 1024 for 2-ASIC vertically stacked
+
+source_spectrum:
+  source_run_file: source.raw   # resolves to /path/to/raw/data/source.raw
+  calibration_file: dark_calibration.h5  # resolves to /path/to/raw/data/dark_calibration.h5
+  save_events_to_file: events.h5  # resolves to ./results/events.h5
 ```
 
-Case 2 — RAW, full frame, analyse H1 only
 
-yaml
+### Supported frame sizes
 
-```
-dark_frames:
-  dark_run_file: dark_run.raw
-  data_format: raw
-  # raw_height and raw_width can be omitted — 1024 is in the auto-detect list
-  asics: [H1]
-```
-
-Case 3 — RAW, 512×512 (H1 readout only)
-
-yaml
-
-```
-dark_frames:
-  dark_run_file: dark_run_H1.raw
-  data_format: raw
-  raw_height: 512        # tell the reader the frame height
-  raw_width: 512         # optional but good as a consistency check
-  asics: [H1]            # must match what was recorded — used for embeddin
-```
+Single-hybrid RAW format:
+- **512×512** — full single ASIC
+- **1024×512** — 2 ASICs vertically stacked
+- Other heights auto-detected (128, 256, 512, 1024, 2048, 4096)
 
 
 ### Starting from saved events (for gain/CTI calibration)
@@ -80,7 +76,7 @@ dark_frames:
 ```python
 from pnccd_ana.utils.io_h5 import load_events_h5
 
-data = load_events_h5("run0001/events.h5")
+data = load_events_h5("output/events.h5")
 events    = data["events"]       # structured array Y, X, grade, adu_sum
 spectra   = data["spectra"]      # dict grade → histogram counts
 bin_edges = data["bin_edges"]
@@ -113,11 +109,10 @@ from pnccd_ana.config            import Config
 cfg = Config.from_yaml("analysis.yaml")
 
 # Load calibration
-cal = load_calibration_h5("run0001/dark_calibration.h5",
-                           asics=["H0", "H1"])
+cal = load_calibration_h5(cfg.calibration_path(), asics=["H0"])
 
 # Process one frame manually
-raw = ...   # float32 (1024, 1024)
+raw = ...   # float32 (H, W)
 noise_map = cal["global"]["noise"]
 corrected, _ = cm_correct_frame(raw - cal["global"]["offset"])
 events = find_events(corrected, noise_map, threshold_sigma=3.0)
@@ -129,21 +124,18 @@ events = find_events(corrected, noise_map, threshold_sigma=3.0)
 
 ```
 data[frame, Y, X]
-  Y = axis=1 = vertical screen   = detector column direction  → y-axis in plots
-  X = axis=2 = horizontal screen = detector row direction     → x-axis in plots
+  Y = axis=0 = vertical screen   = detector row direction  → y-axis in plots
+  X = axis=1 = horizontal screen = detector column direction → x-axis in plots
 
-imshow(arr) — no transpose needed.
+imshow(arr, origin="lower") — Y=0 at bottom
 
-Sensor layout (X on x-axis, Y on y-axis, origin=lower-left):
-Y=1023 ┌──────────┬──────────┐
-       │    H3    │    H0    │  top
-Y= 512 ├──────────┼──────────┤
-       │    H2    │    H1    │  bottom
-Y=   0 └──────────┴──────────┘
-      X=0       X=512     X=1023
-      left              right
+Single hybrid readout (e.g. H0 at top-right):
+                    Y
+                    ↑   0 … H-1
+                    │
+                    └──X→  0 … W-1
 
-CM correction: median over Y (axis=1) for each X position.
+CM correction: median over Y (axis=0) for each X position.
 ```
 
 

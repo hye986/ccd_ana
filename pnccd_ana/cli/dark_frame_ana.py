@@ -25,8 +25,7 @@ from ..lib    import (compute_offset_median,
                        compute_cm_noise,
                        resolve_asics, split_asics,
                        ASIC_SLICES, ALL_ASICS)
-from ..utils  import (get_io_module,
-                       save_calibration_h5, save_calibration_npy,
+from ..utils  import (save_calibration_h5, save_calibration_npy,
                        plot_offsets, plot_noise,
                        plot_cm_map, plot_asic_overview,
                        plot_summary_dashboard)
@@ -234,28 +233,33 @@ def run(cfg: Config) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
 
 
-    h5_path  = dc["dark_run_file"]
-    if not h5_path:
+    dark_run_file = dc["dark_run_file"]
+    if not dark_run_file:
         raise ValueError("[dark_frames] dark_run_file must be set in config.")
+
+    # Resolve input path relative to data_dir
+    dark_run_path = cfg.resolve_input_path(dark_run_file)
 
     methods  = cfg.methods_for_dark()
     n_sigma  = float(dc["sigma_clip_nsigma"])
     asics    = cfg.asics_for("dark_frames")
 
     # ── Resolve file list (single path, glob, or list) ────────────────────────
-    run_files = _resolve_paths(h5_path)
+    run_files = _resolve_paths(dark_run_path)
     print(f"\nDark run file(s): {len(run_files)} file(s) matched")
     for p in run_files:
         print(f"  {p}")
 
     # ── Load all dark frames (dark frames fit in memory for typical runs) ──────
-    io = get_io_module(dc["data_format"])
+    # Always uses RAW format (512x512 or 1024x512 based on raw_height config)
+    from ..utils.io_raw import get_io_module as raw_get_io_module
+    io = raw_get_io_module()
+
     raw_kwargs = {}
-    if dc["data_format"] == "raw":
-        if dc.get("raw_height"):
-            raw_kwargs["height"] = dc["raw_height"]
-        if dc.get("raw_width"):
-            raw_kwargs["width"] = dc["raw_width"]
+    if dc.get("raw_height"):
+        raw_kwargs["height"] = dc["raw_height"]
+    if dc.get("raw_width"):
+        raw_kwargs["width"] = dc["raw_width"]
 
     def _load_chunk(raw: np.ndarray, _idx: np.ndarray) -> np.ndarray:
         return raw   # pass raw frames through unchanged

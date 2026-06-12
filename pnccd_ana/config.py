@@ -7,29 +7,32 @@ Config file format (YAML)
 ─────────────────────────
 
   general:
-    output_dir: run0001
+    output_dir: output            # output directory for results
+    data_dir: .                  # base input directory
     save_frame_plots: true
     save_asic_plots: true
-    metadata:                     # arbitrary key-value pairs saved into HDF5
+    metadata:                    # arbitrary key-value pairs saved into HDF5
       operator: Alice
       sample: Fe55_source
       run_date: 2026-05-01
 
   dark_frames:
-    dark_run_file: dark_run.h5
-    pedestal_method: both         # median | sigclip | both
+    dark_run_file: dark_run.raw  # relative to data_dir
+    raw_height: 512              # RAW frame height (auto-detected if null)
+    pedestal_method: both        # median | sigclip | both
     sigma_clip_nsigma: 3.0
-    asics: [H0, H1, H2, H3]      # or 'all' or omit for full-frame
-    max_frames: null              # null = all
+    asics: [H0]                  # single ASIC only (e.g. [H0])
+    max_frames: null             # null = all
     save_npy: true
     save_h5: true
     compare_pedestal_methods: true
 
   source_spectrum:
-    source_run_file: source_run.h5
-    calibration_file: run0001/dark_calibration.h5   # or dir of .npy
-    threshold_sigma: 3.0
-    asics: [H0, H1, H2, H3]
+    source_run_file: source_run.raw  # relative to data_dir
+    raw_height: 512              # RAW frame height (auto-detected if null)
+    calibration_file: dark_calibration.h5  # relative to data_dir
+    seed_sigma: 5.0
+    asics: [H0]                  # single ASIC only (e.g. [H0])
     max_frames: null
     n_workers: 8
     chunk_size: 64
@@ -37,15 +40,14 @@ Config file format (YAML)
     adu_max: 10000.0
     n_bins: 1000
     save_events: true
-    save_events_to_file: run0001/events.h5
+    save_events_to_file: events.h5  # relative to output_dir
 
-  gain_calibration:             # populated in a future step
-    events_file: run0001/events.h5
-    # ... (to be defined)
-
-  cti_calibration:              # populated in a future step
-    events_file: run0001/events.h5
-    # ... (to be defined)
+Path resolution:
+  - Input paths (dark_run_file, source_run_file, calibration_file) are resolved
+    relative to data_dir if not absolute
+  - Output paths (save_events_to_file) are resolved relative to output_dir
+  - calibration_file defaults to {output_dir}/dark_calibration.h5 if not set
+  - save_events_to_file defaults to {output_dir}/events.h5 if not set
 
 Sections not present in the YAML are simply skipped at runtime.
 Each CLI script reads only the section(s) it needs, so you can reuse a
@@ -70,16 +72,16 @@ except ImportError:
 
 _DEFAULTS: dict[str, Any] = {
     "general": {
-        "output_dir":       "output",
+        "output_dir":       "output",      # base output directory for results
+        "data_dir":         ".",           # base input directory for data files
         "save_frame_plots": True,
         "save_asic_plots":  True,
         "metadata":         {},
     },
     "dark_frames": {
         "dark_run_file":            None,
-        "data_format":              "h5",   # "h5" or "raw"
-        "raw_height":               None,   # RAW only: frame height (auto-detected if None)
-        "raw_width":                None,   # RAW only: frame width  (consistency check)
+        "raw_height":               None,   # RAW frame height (auto-detected if None)
+        "raw_width":                None,   # RAW frame width (consistency check; optional)
         "pedestal_method":          "both",
         "sigma_clip_nsigma":        3.0,
         "asics":                    None,
@@ -93,10 +95,9 @@ _DEFAULTS: dict[str, Any] = {
     },
     "source_spectrum": {
         "source_run_file":    None,
-        "data_format":        "h5",   # "h5" or "raw"
-        "raw_height":         None,   # RAW only: frame height (auto-detected if None)
-        "raw_width":          None,   # RAW only: frame width  (consistency check)
-        "calibration_file":   None,
+        "raw_height":         None,   # RAW frame height (auto-detected if None)
+        "raw_width":          None,   # RAW frame width (consistency check; optional)
+        "calibration_file":   None,   # defaults to {output_dir}/dark_calibration.h5
         "seed_sigma":         5.0,
         "split_sigma":        3.0,
         "noise_scope":        "auto",
@@ -110,7 +111,7 @@ _DEFAULTS: dict[str, Any] = {
         "adu_max":            10000.0,
         "n_bins":             1000,
         "save_events":        True,
-        "save_events_to_file": None,
+        "save_events_to_file": None,   # defaults to {output_dir}/events.h5
         "prefer_offset":      "sigclip",
         "bad_pixel_mask":     {           # set enabled: false to disable
             "enabled":           True,
@@ -161,6 +162,48 @@ class Config:
     @property
     def output_dir(self) -> Path:
         return Path(self.general["output_dir"])
+
+    @property
+    def data_dir(self) -> Path:
+        return Path(self.general["data_dir"])
+
+    def resolve_input_path(self, path: str | Path | None) -> Path | None:
+        """
+        Resolve an input file path relative to data_dir.
+        
+        If path is None, returns None.
+        If path is absolute, returns as-is.
+        If path is relative, joins with data_dir.
+        """
+        if path is None:
+            return None
+        p = Path(path)
+        if p.is_absolute():
+            return p
+        return self.data_dir / p
+
+    def resolve_output_path(self, path: str | Path | None) -> Path | None:
+        """
+        Resolve an output file path relative to output_dir.
+        
+        If path is None, returns None.
+        If path is absolute, returns as-is.
+        If path is relative, joins with output_dir.
+        """
+        if path is None:
+            return None
+        p = Path(path)
+        if p.is_absolute():
+            return p
+        return self.output_dir / p
+
+    def calibration_path(self) -> Path:
+        """Default path for dark calibration file."""
+        return self.resolve_output_path("dark_calibration.h5")
+
+    def events_path(self) -> Path:
+        """Default path for events file."""
+        return self.resolve_output_path("events.h5")
 
     def asics_for(self, section: str) -> list[str] | None:
         """Return resolved ASIC list for *section* (e.g. 'dark_frames')."""
@@ -229,9 +272,11 @@ class Config:
 _TEMPLATE = """\
 # pnccd_ana analysis configuration
 # Generated by pnccd_ana.config — edit as needed.
+# This template is for single hybrid RAW format (512x512, 1024x512, etc.).
 
 general:
-  output_dir: run0001
+  output_dir: output                # output directory for results
+  data_dir: .                       # base input directory (paths are relative to this)
   save_frame_plots: true
   save_asic_plots: true
   metadata:
@@ -240,14 +285,13 @@ general:
     run_date: ""
 
 dark_frames:
-  dark_run_file: dark_run.h5
-  data_format: h5             # h5 | raw
-  # raw_height: 1024          # RAW only: frame height in pixels (auto-detected if omitted)
-  # raw_width: 1024           # RAW only: frame width  in pixels (optional check)
-  pedestal_method: both         # median | sigclip | both
+  dark_run_file: dark_run.raw       # relative to data_dir
+  raw_height: 512                   # RAW frame height (auto-detected if null)
+  raw_width: null                    # RAW frame width (consistency check; null = auto)
+  pedestal_method: both             # median | sigclip | both
   sigma_clip_nsigma: 3.0
-  asics: [H0, H1, H2, H3]      # list of ASICs, 'all', or remove for full-frame
-  max_frames: null              # null = all frames
+  asics: [H0]                       # single ASIC only (H0, H1, H2, or H3)
+  max_frames: null                  # null = all frames
   complete_only: true
   save_npy: true
   save_h5: true
@@ -256,16 +300,15 @@ dark_frames:
   chunk_size: 64
 
 source_spectrum:
-  source_run_file: source_run.h5
-  data_format: h5             # h5 | raw
-  # raw_height: 1024          # RAW only: frame height in pixels (auto-detected if omitted)
-  # raw_width: 1024           # RAW only: frame width  in pixels (optional check)
-  calibration_file: run0001/dark_calibration.h5
-  seed_sigma: 5.0           # threshold for finding candidate centres (3–8 × noise)
-  split_sigma: 3.0          # threshold for classifying neighbours (1–3 × noise)
-  noise_scope: auto          # auto | global | asic; auto avoids unrealistically low ASIC noise maps
-  reject_extra: false        # if true, discard grade-13 "other" events
-  asics: [H0, H1, H2, H3]
+  source_run_file: source_run.raw    # relative to data_dir
+  raw_height: 512                   # RAW frame height (auto-detected if null)
+  raw_width: null                    # RAW frame width (consistency check; null = auto)
+  calibration_file: dark_calibration.h5  # relative to data_dir (or output_dir if not found)
+  seed_sigma: 5.0                   # threshold for finding candidate centres (3-8 × noise)
+  split_sigma: 3.0                  # threshold for classifying neighbours (1-3 × noise)
+  noise_scope: auto                 # auto | global | asic
+  reject_extra: false               # if true, discard grade-13 "other" events
+  asics: [H0]                       # single ASIC only (H0, H1, H2, or H3)
   max_frames: null
   complete_only: true
   n_workers: 8
@@ -274,19 +317,19 @@ source_spectrum:
   adu_max: 10000.0
   n_bins: 1000
   save_events: true
-  save_events_to_file: run0001/events.h5
-  prefer_offset: sigclip        # sigclip | median
-  bad_pixel_mask:               # exclude hot / cold / unstable pixels from event recognition
+  save_events_to_file: events.h5    # relative to output_dir
+  prefer_offset: sigclip            # sigclip | median
+  bad_pixel_mask:                   # exclude hot / cold / unstable pixels from event recognition
     enabled: true
-    hot_rms_multiple: 5.0       # noise > this × median(active noise) → HOT
-    cold_rms_fraction: 0.1      # noise < this × median(active noise) → COLD / stuck
-    max_clip_fraction: 0.5      # frac of dark frames clipped per pixel above which it's UNSTABLE
-    n_dark_frames: 0            # 0 disables the clip-fraction test (no info in the cal file)
+    hot_rms_multiple: 5.0           # noise > this × median(active noise) → HOT
+    cold_rms_fraction: 0.1          # noise < this × median(active noise) → COLD / stuck
+    max_clip_fraction: 0.5          # frac of dark frames clipped per pixel above which it's UNSTABLE
+    n_dark_frames: 0                # 0 disables the clip-fraction test (no info in the cal file)
 
-# gain_calibration:             # uncomment and fill in for gain step
+# gain_calibration:                 # uncomment and fill in for gain step
 #   events_file: run0001/events.h5
 
-# cti_calibration:              # uncomment and fill in for CTI step
+# cti_calibration:                  # uncomment and fill in for CTI step
 #   events_file: run0001/events.h5
 """
 

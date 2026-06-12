@@ -20,8 +20,7 @@ from ..lib    import (find_events, resolve_asics,
                        ASIC_SLICES, ALL_ASICS, N_GRADES, EVENT_DTYPE,
                        build_bad_pixel_mask)
 from ..lib.common_mode import cm_correct_frame
-from ..utils  import (get_io_module,
-                       load_calibration_h5, load_calibration_npy,
+from ..utils  import (load_calibration_h5, load_calibration_npy,
                        save_events_h5,
                        plot_hitmap, plot_asic_hitmaps,
                        plot_spectrum, plot_asic_spectra,
@@ -350,12 +349,20 @@ def run(cfg: Config) -> dict:
     out_dir = cfg.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    h5_path = sc["source_run_file"]
-    cal_src = sc["calibration_file"]
-    if not h5_path:
+    source_run_file = sc["source_run_file"]
+    calibration_file = sc["calibration_file"]
+    
+    # Resolve paths: input files from data_dir, output files to output_dir
+    if not source_run_file:
         raise ValueError("[source_spectrum] source_run_file must be set.")
-    if not cal_src:
+    if not calibration_file:
         raise ValueError("[source_spectrum] calibration_file must be set.")
+    
+    source_run_path = cfg.resolve_input_path(source_run_file)
+    calibration_path = cfg.resolve_input_path(calibration_file)
+    
+    if calibration_path is None:
+        calibration_path = cfg.calibration_path()
 
     asics           = cfg.asics_for("source_spectrum")
     seed_sigma      = float(sc.get("seed_sigma",  sc.get("threshold_sigma", 5.0)))
@@ -365,8 +372,8 @@ def run(cfg: Config) -> dict:
     noise_scope     = sc.get("noise_scope", "auto")
 
     # ── Load calibration ──────────────────────────────────────────────────────
-    print(f"\nLoading calibration from: {cal_src}")
-    cal = _load_cal(cal_src, asics, prefer=prefer)
+    print(f"\nLoading calibration from: {calibration_path}")
+    cal = _load_cal(calibration_path, asics, prefer=prefer)
 
     # Fill per-ASIC from global slice if missing
     if asics:
@@ -398,19 +405,21 @@ def run(cfg: Config) -> dict:
         np.save(out_dir / "bad_pixel_mask.npy", bad_pixel_mask)
 
     # ── Resolve file list (single path, glob, or list) ────────────────────────
-    run_files = _resolve_paths(h5_path)
+    run_files = _resolve_paths(source_run_path)
     print(f"\nSource run file(s): {len(run_files)} file(s) matched")
     for p in run_files:
         print(f"  {p}")
 
     # ── Discover and process frames across all files ──────────────────────────
-    io = get_io_module(sc["data_format"])
+    # Always uses RAW format (512x512 or 1024x512 based on raw_height config)
+    from ..utils.io_raw import get_io_module as raw_get_io_module
+    io = raw_get_io_module()
+
     raw_kwargs = {}
-    if sc["data_format"] == "raw":
-        if sc.get("raw_height"):
-            raw_kwargs["height"] = sc["raw_height"]
-        if sc.get("raw_width"):
-            raw_kwargs["width"] = sc["raw_width"]
+    if sc.get("raw_height"):
+        raw_kwargs["height"] = sc["raw_height"]
+    if sc.get("raw_width"):
+        raw_kwargs["width"] = sc["raw_width"]
 
     # Sample buffer for raw spectrum plots (collect up to 200 corrected frames)
     # Shared across all input files — worker appends to it as frames are processed.
@@ -528,12 +537,16 @@ def run(cfg: Config) -> dict:
 
     events_h5_path = sc.get("save_events_to_file")
     if events_h5_path:
+        # Resolve output path relative to output_dir
+        events_path = cfg.resolve_output_path(events_h5_path)
+        if events_path is None:
+            events_path = cfg.events_path()
         save_events_h5(
-            events_h5_path,
+            events_path,
             events, spectra, bin_edges, hit_count, mean_adu,
             metadata={**gen.get("metadata", {}),
-                      "source_file":    str(h5_path),
-                      "calibration":    str(cal_src),
+                      "source_file":    str(source_run_path),
+                      "calibration":    str(calibration_path),
                       "threshold_sigma": seed_sigma,
                       "n_frames":       int(len(indices))},
         )
