@@ -9,8 +9,14 @@ Config file format (YAML)
   general:
     output_dir: output            # output directory for results
     data_dir: .                  # base input directory
-    save_frame_plots: true
-    save_asic_plots: true
+    # Shared settings (used by both dark_frames and source_spectrum):
+    raw_height: 512              # RAW frame height (auto-detected if null)
+    raw_width: null              # RAW frame width (consistency check; optional)
+    asics: [H0]                  # ASIC(s) to analyse
+    n_workers: 8                 # parallel workers
+    chunk_size: 64               # frames per chunk
+    max_frames: null             # null = all frames
+    complete_only: true          # skip incomplete last frame
     metadata:                    # arbitrary key-value pairs saved into HDF5
       operator: Alice
       sample: Fe55_source
@@ -18,29 +24,25 @@ Config file format (YAML)
 
   dark_frames:
     dark_run_file: dark_run.raw  # relative to data_dir
-    raw_height: 512              # RAW frame height (auto-detected if null)
     pedestal_method: both        # median | sigclip | both
     sigma_clip_nsigma: 3.0
-    asics: [H0]                  # single ASIC only (e.g. [H0])
-    max_frames: null             # null = all
+    compare_pedestal_methods: true
     save_npy: true
     save_h5: true
-    compare_pedestal_methods: true
 
   source_spectrum:
     source_run_file: source_run.raw  # relative to data_dir
-    raw_height: 512              # RAW frame height (auto-detected if null)
     calibration_file: dark_calibration.h5  # relative to data_dir
     seed_sigma: 5.0
-    asics: [H0]                  # single ASIC only (e.g. [H0])
-    max_frames: null
-    n_workers: 8
-    chunk_size: 64
+    split_sigma: 3.0
+    noise_scope: auto
+    reject_extra: false
     adu_min: 0.0
     adu_max: 10000.0
     n_bins: 1000
     save_events: true
     save_events_to_file: events.h5  # relative to output_dir
+    prefer_offset: sigclip
 
 Path resolution:
   - Input paths (dark_run_file, source_run_file, calibration_file) are resolved
@@ -74,39 +76,31 @@ _DEFAULTS: dict[str, Any] = {
     "general": {
         "output_dir":       "output",      # base output directory for results
         "data_dir":         ".",           # base input directory for data files
-        "save_frame_plots": True,
-        "save_asic_plots":  True,
+        # Shared settings (used by both dark_frames and source_spectrum):
+        "raw_height":       None,          # RAW frame height (auto-detected if None)
+        "raw_width":        None,          # RAW frame width (consistency check; optional)
+        "asics":            None,          # ASIC(s) to analyse
+        "n_workers":        8,             # parallel workers
+        "chunk_size":       64,            # frames per chunk
+        "max_frames":       None,          # null = all
+        "complete_only":    True,          # skip incomplete last frame
         "metadata":         {},
     },
     "dark_frames": {
         "dark_run_file":            None,
-        "raw_height":               None,   # RAW frame height (auto-detected if None)
-        "raw_width":                None,   # RAW frame width (consistency check; optional)
         "pedestal_method":          "both",
         "sigma_clip_nsigma":        3.0,
-        "asics":                    None,
-        "max_frames":               None,
-        "complete_only":            True,
+        "compare_pedestal_methods": True,
         "save_npy":                 True,
         "save_h5":                  True,
-        "compare_pedestal_methods": True,
-        "n_workers":                8,
-        "chunk_size":               64,
     },
     "source_spectrum": {
         "source_run_file":    None,
-        "raw_height":         None,   # RAW frame height (auto-detected if None)
-        "raw_width":          None,   # RAW frame width (consistency check; optional)
         "calibration_file":   None,   # defaults to {output_dir}/dark_calibration.h5
         "seed_sigma":         5.0,
         "split_sigma":        3.0,
         "noise_scope":        "auto",
         "reject_extra":       False,
-        "asics":              None,
-        "max_frames":         None,
-        "complete_only":      True,
-        "n_workers":          8,
-        "chunk_size":         64,
         "adu_min":            0.0,
         "adu_max":            10000.0,
         "n_bins":             1000,
@@ -206,9 +200,13 @@ class Config:
         return self.resolve_output_path("events.h5")
 
     def asics_for(self, section: str) -> list[str] | None:
-        """Return resolved ASIC list for *section* (e.g. 'dark_frames')."""
+        """Return resolved ASIC list for *section*.
+
+        Reads from general['asics'] for single-hybrid mode (ASICs are not
+        stage-specific).
+        """
         from .lib.geometry import resolve_asics
-        raw = getattr(self, section, {}).get("asics", None)
+        raw = self.general.get("asics", None)
         if isinstance(raw, str):
             raw = raw.split()
         return resolve_asics(raw)
@@ -277,8 +275,14 @@ _TEMPLATE = """\
 general:
   output_dir: output                # output directory for results
   data_dir: .                       # base input directory (paths are relative to this)
-  save_frame_plots: true
-  save_asic_plots: true
+  # Shared settings (used by both dark_frames and source_spectrum):
+  raw_height: 512                   # RAW frame height (auto-detected if null)
+  raw_width: null                   # RAW frame width (consistency check; null = auto)
+  asics: [H0]                       # ASIC(s) to analyse
+  n_workers: 8                      # parallel workers
+  chunk_size: 64                    # frames per chunk
+  max_frames: null                  # null = all frames
+  complete_only: true               # skip incomplete last frame
   metadata:
     operator: ""
     sample: ""
@@ -286,33 +290,19 @@ general:
 
 dark_frames:
   dark_run_file: dark_run.raw       # relative to data_dir
-  raw_height: 512                   # RAW frame height (auto-detected if null)
-  raw_width: null                    # RAW frame width (consistency check; null = auto)
   pedestal_method: both             # median | sigclip | both
   sigma_clip_nsigma: 3.0
-  asics: [H0]                       # single ASIC only (H0, H1, H2, or H3)
-  max_frames: null                  # null = all frames
-  complete_only: true
-  save_npy: true
-  save_h5: true
-  compare_pedestal_methods: true
-  n_workers: 8
-  chunk_size: 64
+  compare_pedestal_methods: true    # compare median vs sigma-clip offsets
+  save_npy: true                    # save as .npy files
+  save_h5: true                     # save as .h5 file
 
 source_spectrum:
-  source_run_file: source_run.raw    # relative to data_dir
-  raw_height: 512                   # RAW frame height (auto-detected if null)
-  raw_width: null                    # RAW frame width (consistency check; null = auto)
+  source_run_file: source_run.raw   # relative to data_dir
   calibration_file: dark_calibration.h5  # relative to data_dir (or output_dir if not found)
   seed_sigma: 5.0                   # threshold for finding candidate centres (3-8 × noise)
   split_sigma: 3.0                  # threshold for classifying neighbours (1-3 × noise)
   noise_scope: auto                 # auto | global | asic
   reject_extra: false               # if true, discard grade-13 "other" events
-  asics: [H0]                       # single ASIC only (H0, H1, H2, or H3)
-  max_frames: null
-  complete_only: true
-  n_workers: 8
-  chunk_size: 64
   adu_min: 0.0
   adu_max: 10000.0
   n_bins: 1000

@@ -155,28 +155,28 @@ def run(cfg: Config) -> dict:
     io = raw_get_io_module()
 
     raw_kwargs = {}
-    if dc.get("raw_height"):
-        raw_kwargs["height"] = dc["raw_height"]
-    if dc.get("raw_width"):
-        raw_kwargs["width"] = dc["raw_width"]
+    if gen.get("raw_height"):
+        raw_kwargs["height"] = gen["raw_height"]
+    if gen.get("raw_width"):
+        raw_kwargs["width"] = gen["raw_width"]
 
     def _load_chunk(raw: np.ndarray, _idx: np.ndarray) -> np.ndarray:
         return raw   # pass raw frames through unchanged
 
     all_chunks: list[np.ndarray] = []
-    remaining = dc["max_frames"]   # None = unlimited; decremented per file
+    remaining = gen["max_frames"]   # None = unlimited; decremented per file
 
     for fpath in run_files:
         if remaining is not None and remaining <= 0:
             break
         print(f"\nLoading dark frames from: {fpath}")
         indices = io.get_frame_indices(fpath,
-                                       complete_only=dc["complete_only"],
+                                       complete_only=gen["complete_only"],
                                        max_frames=remaining,
                                        **raw_kwargs)
         chunks = io.process_frames_mt(fpath, indices, _load_chunk,
-                                      chunk_size=dc["chunk_size"],
-                                      n_workers=dc["n_workers"],
+                                      chunk_size=gen["chunk_size"],
+                                      n_workers=gen["n_workers"],
                                       desc="dark frames",
                                       **raw_kwargs)
         all_chunks.extend(chunks)

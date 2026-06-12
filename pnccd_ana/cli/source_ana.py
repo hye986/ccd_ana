@@ -265,10 +265,10 @@ def run(cfg: Config) -> dict:
     io = raw_get_io_module()
 
     raw_kwargs = {}
-    if sc.get("raw_height"):
-        raw_kwargs["height"] = sc["raw_height"]
-    if sc.get("raw_width"):
-        raw_kwargs["width"] = sc["raw_width"]
+    if gen.get("raw_height"):
+        raw_kwargs["height"] = gen["raw_height"]
+    if gen.get("raw_width"):
+        raw_kwargs["width"] = gen["raw_width"]
 
     # Sample buffer for raw spectrum plots (collect up to 200 corrected frames)
     # Shared across all input files — worker appends to it as frames are processed.
@@ -281,22 +281,22 @@ def run(cfg: Config) -> dict:
                           sample_buf=sample_buf, sample_max=200)
 
     all_results: list[np.ndarray] = []
-    remaining = sc["max_frames"]   # None = unlimited; decremented per file
+    remaining = gen["max_frames"]   # None = unlimited; decremented per file
 
     for fpath in run_files:
         if remaining is not None and remaining <= 0:
             break
         print(f"\nOpening source file: {fpath}")
         indices = io.get_frame_indices(fpath,
-                                       complete_only=sc["complete_only"],
+                                       complete_only=gen["complete_only"],
                                        max_frames=remaining,
                                        **raw_kwargs)
         print(f"Processing {len(indices)} frames  "
               f"(seed={seed_sigma}σ, split={split_sigma}σ,  "
-              f"workers={sc['n_workers']}, chunk={sc['chunk_size']})")
+              f"workers={gen['n_workers']}, chunk={gen['chunk_size']})")
         file_results = io.process_frames_mt(fpath, indices, worker,
-                                            chunk_size=sc["chunk_size"],
-                                            n_workers=sc["n_workers"],
+                                            chunk_size=gen["chunk_size"],
+                                            n_workers=gen["n_workers"],
                                             desc="source frames",
                                             **raw_kwargs)
         all_results.extend(file_results)
