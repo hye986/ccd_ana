@@ -38,7 +38,7 @@ def correct_frame(
 
     Parameters
     ----------
-    raw   : float32 (Y, X)  — raw ADC values after optional rollover correction
+    raw   : float32 (Y, X)  — raw ADC values
     cal   : calibration dict from load_calibration_h5()
     asics : list of ASIC names, or None for global
 

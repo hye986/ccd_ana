@@ -12,7 +12,7 @@ from .io_raw  import (get_frame_indices  as raw_get_frame_indices,
                        detect_raw_geometry,
                        get_io_module)
                     
-from .plotting import (plot_rollover, plot_offsets, plot_noise, plot_cm_map,
+from .plotting import (plot_offsets, plot_noise, plot_cm_map,
                         plot_asic_overview, plot_summary_dashboard,
                         plot_hitmap, plot_asic_hitmaps,
                         plot_spectrum, plot_asic_spectra, 

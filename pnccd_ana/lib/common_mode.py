@@ -44,7 +44,7 @@ def apply_common_mode_correction(
 
     Parameters
     ----------
-    data   : float32 (n_frames, n_Y, n_X) — raw or rollover-corrected frames
+    data   : float32 (n_frames, n_Y, n_X) — raw frames
     offset : float32 (n_Y, n_X)           — pedestal map
 
     Returns

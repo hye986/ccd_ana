@@ -20,10 +20,6 @@ Config file format (YAML)
     pedestal_method: both         # median | sigclip | both
     sigma_clip_nsigma: 3.0
     asics: [H0, H1, H2, H3]      # or 'all' or omit for full-frame
-    rollover_check: true
-    unwrap_rollover: false
-    rollover_low_frac: 0.10
-    rollover_high_frac: 0.80
     max_frames: null              # null = all
     save_npy: true
     save_h5: true
@@ -87,10 +83,6 @@ _DEFAULTS: dict[str, Any] = {
         "pedestal_method":          "both",
         "sigma_clip_nsigma":        3.0,
         "asics":                    None,
-        "rollover_check":           True,
-        "unwrap_rollover":          False,
-        "rollover_low_frac":        0.10,
-        "rollover_high_frac":       0.80,
         "max_frames":               None,
         "complete_only":            True,
         "save_npy":                 True,
@@ -255,10 +247,6 @@ dark_frames:
   pedestal_method: both         # median | sigclip | both
   sigma_clip_nsigma: 3.0
   asics: [H0, H1, H2, H3]      # list of ASICs, 'all', or remove for full-frame
-  rollover_check: true
-  unwrap_rollover: false
-  rollover_low_frac: 0.10
-  rollover_high_frac: 0.80
   max_frames: null              # null = all frames
   complete_only: true
   save_npy: true
