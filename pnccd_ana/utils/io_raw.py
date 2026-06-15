@@ -293,18 +293,21 @@ class _RawStore:
 
         Indices must be in [0, n_frames).  Order is preserved.
         
-        Records are rows: each record contains W pixels. 
-        Frame i starts at record i*H and contains H consecutive rows.
+        Optimized for large files: reads contiguous memory regions instead of
+        iterating row-by-row.
         """
         W  = self.width
         H  = self.height
         n  = len(indices)
         out = np.empty((n, H, W), dtype=np.float32)
+        
         for i, fi in enumerate(indices):
             rec_start = int(fi) * H
-            # Each record is one row of W pixels; stack H rows into frame
-            rows = [np.asarray(self._recs[rec_start + r]["pix"]) for r in range(H)]
-            out[i] = np.stack(rows, axis=0).astype(np.float32)
+            # Read H consecutive rows as a contiguous block and extract pixels
+            # This is much faster than iterating row-by-row
+            frame_rows = self._recs[rec_start:rec_start + H]["pix"]
+            out[i] = np.ascontiguousarray(frame_rows, dtype=np.float32)
+        
         return out
 
 

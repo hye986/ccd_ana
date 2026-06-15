@@ -221,13 +221,22 @@ def run(cfg: Config) -> dict:
     # Resolve paths: input files from data_dir, output files to output_dir
     if not source_run_file:
         raise ValueError("[source_spectrum] source_run_file must be set.")
-    if not calibration_file:
-        raise ValueError("[source_spectrum] calibration_file must be set.")
     
     source_run_path = cfg.resolve_input_path(source_run_file)
-    calibration_path = cfg.resolve_input_path(calibration_file)
     
-    if calibration_path is None:
+    # Calibration file: default to output_dir/dark_calibration.h5
+    # If user provides a path, try data_dir first, then output_dir
+    if calibration_file:
+        cal_input = cfg.resolve_input_path(calibration_file)
+        cal_output = cfg.resolve_output_path(calibration_file)
+        if cal_input and cal_input.exists():
+            calibration_path = cal_input
+        elif cal_output and cal_output.exists():
+            calibration_path = cal_output
+        else:
+            raise FileNotFoundError(
+                f"Calibration file not found: tried {cal_input} and {cal_output}")
+    else:
         calibration_path = cfg.calibration_path()
 
     asics           = cfg.asics_for("source_spectrum")
