@@ -123,12 +123,15 @@ def _try_geometry(path: str | Path, data_bytes: int,
 
     # Height H = records per frame (rows per frame)
     if len(frame_starts) == 1:
-        # Only one frame marker at start — infer H from total records
-        # This works for single-frame files or when H is unknown
-        if n_records == candidate_h:
+        # Only one frame marker at start — use provided candidate_h or infer from n_records
+        if candidate_h is not None:
+            # Trust the explicitly provided height
+            records_per_frame = candidate_h
+        elif n_records in _COMMON_HEIGHTS:
+            # Auto-detect: single-frame file where n_records IS the height
             records_per_frame = n_records
         else:
-            # Try to find H from candidate list
+            # Cannot infer height from marker pattern
             return None
     else:
         # Multiple frames — H is the gap between frame markers
