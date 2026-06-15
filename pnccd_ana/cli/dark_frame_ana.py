@@ -96,9 +96,13 @@ def _resolve_paths(file_spec) -> list[Path]:
 
     Raises FileNotFoundError if no files match.
     """
+    from pathlib import Path
     from glob import glob
 
-    specs = [file_spec] if isinstance(file_spec, str) else list(file_spec)
+    if isinstance(file_spec, (str, Path)):
+        specs = [str(file_spec)]
+    else:
+        specs = [str(s) for s in file_spec]
     paths: list[Path] = []
     for spec in specs:
         matched = sorted(glob(str(spec)))
