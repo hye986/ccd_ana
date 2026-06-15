@@ -154,7 +154,7 @@ def run(cfg: Config) -> dict:
         print(f"  {p}")
 
     # ── Load all dark frames (dark frames fit in memory for typical runs) ──────
-    # Always uses RAW format (512x512 or 1024x512 based on raw_height config)
+    # Always uses RAW format (512x512 or 1024x512 based on frame_rows config)
     from ..utils.io_raw import get_io_module as raw_get_io_module
     io = raw_get_io_module(gen.get("data_format", "raw"))
 

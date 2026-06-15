@@ -130,7 +130,7 @@ Array / axis convention — read before you plot
     version is configured for SINGLE HYBRID operation. Supported frame sizes:
       - 512×512  (full single ASIC)
       - 1024×512 (2 ASICs vertically stacked)
-      - Other heights supported via raw_height config option
+      - Other heights supported via frame_rows config option
 
       H0 (top-right) — single ASIC readout
                           Y

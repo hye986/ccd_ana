@@ -29,7 +29,7 @@ Single-hybrid supported sizes
 -----------------------------
   512×512  — full single ASIC (H=512, W=512)
   1024×512 — 2 ASICs vertically stacked (H=1024, W=512)
-  Other heights auto-detected via raw_height config.
+  Other heights auto-detected via frame_rows config.
 
   Frame as displayed (origin=lower, Y=0 at bottom):
                       Y
