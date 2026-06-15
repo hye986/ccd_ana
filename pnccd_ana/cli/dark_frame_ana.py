@@ -156,13 +156,13 @@ def run(cfg: Config) -> dict:
     # ── Load all dark frames (dark frames fit in memory for typical runs) ──────
     # Always uses RAW format (512x512 or 1024x512 based on raw_height config)
     from ..utils.io_raw import get_io_module as raw_get_io_module
-    io = raw_get_io_module("raw")
+    io = raw_get_io_module(gen.get("data_format", "raw"))
 
     raw_kwargs = {}
-    if gen.get("raw_height"):
-        raw_kwargs["height"] = gen["raw_height"]
-    if gen.get("raw_width"):
-        raw_kwargs["width"] = gen["raw_width"]
+    if gen.get("frame_rows"):
+        raw_kwargs["height"] = gen["frame_rows"]
+    if gen.get("frame_cols"):
+        raw_kwargs["width"] = gen["frame_cols"]
 
     def _load_chunk(raw: np.ndarray, _idx: np.ndarray) -> np.ndarray:
         return raw   # pass raw frames through unchanged

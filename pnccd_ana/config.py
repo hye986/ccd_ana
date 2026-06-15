@@ -10,8 +10,9 @@ Config file format (YAML)
     output_dir: output            # output directory for results
     data_dir: .                  # base input directory
     # Shared settings (used by both dark_frames and source_spectrum):
-    raw_height: 512              # RAW frame height (auto-detected if null)
-    raw_width: null              # RAW frame width (consistency check; optional)
+    data_format: raw             # raw | h5 (file format)
+    frame_rows: 1024             # number of rows per frame (Y dimension)
+    frame_cols: 512              # number of columns per frame (X dimension)
     n_workers: 8                 # parallel workers
     chunk_size: 64               # frames per chunk
     max_frames: null             # null = all frames
@@ -76,8 +77,9 @@ _DEFAULTS: dict[str, Any] = {
         "output_dir":       "output",      # base output directory for results
         "data_dir":         ".",           # base input directory for data files
         # Shared settings (used by both dark_frames and source_spectrum):
-        "raw_height":       None,          # RAW frame height (auto-detected if None)
-        "raw_width":        None,          # RAW frame width (consistency check; optional)
+        "data_format":      "raw",         # raw | h5 (file format)
+        "frame_rows":       None,          # number of rows per frame (auto-detected if None)
+        "frame_cols":      None,          # number of columns per frame (auto-detected if None)
         "n_workers":        8,             # parallel workers
         "chunk_size":       64,            # frames per chunk
         "max_frames":       None,          # null = all
@@ -274,8 +276,9 @@ general:
   output_dir: output                # output directory for results
   data_dir: .                       # base input directory (paths are relative to this)
   # Shared settings (used by both dark_frames and source_spectrum):
-  raw_height: 512                   # RAW frame height (auto-detected if null)
-  raw_width: null                   # RAW frame width (consistency check; null = auto)
+  data_format: raw                  # raw | h5 (file format)
+  frame_rows: 1024                  # number of rows per frame (Y dimension)
+  frame_cols: 512                   # number of columns per frame (X dimension)
   n_workers: 8                      # parallel workers
   chunk_size: 64                    # frames per chunk
   max_frames: null                  # null = all frames
