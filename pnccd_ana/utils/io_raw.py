@@ -40,6 +40,11 @@ Reading strategy
   across threads (read-only), so process_frames_mt works without any
   per-thread file-open logic.
 
+Metadata caching
+───────────────
+  Geometry and frame metadata are cached in .metadata/ subfolder for faster
+  subsequent access. Cache is invalidated if source file is modified.
+
   Usage pattern::
 
       indices = get_frame_indices(raw_path, max_frames=1000)
@@ -54,8 +59,12 @@ Reading strategy
 
 from __future__ import annotations
 
+import json
+import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -71,6 +80,91 @@ _FRAME_MARKER  = 0xFFFF
 _LINE_MARKER   = 0xFFFE
 _ADC_EXPECTED  = 0            # ADC counter value written by the recorder
 _COMMON_HEIGHTS = (128, 256, 512, 1024, 2048, 4096)
+_HEADER_SIZE   = 8            # bytes in file header
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Metadata caching
+# ──────────────────────────────────────────────────────────────────────────────
+
+_METADATA_DIR = ".metadata"
+
+
+def _get_metadata_path(raw_path: str | Path) -> Path:
+    """Get path to metadata cache file for a RAW file."""
+    raw_path = Path(raw_path).resolve()
+    return raw_path.parent / _METADATA_DIR / f"{raw_path.name}.json"
+
+
+def _load_metadata(raw_path: str | Path,
+                   height: int | None = None,
+                   width:  int | None = None) -> dict | None:
+    """
+    Load cached metadata if valid and consistent with current file.
+    
+    Returns None if cache is missing, stale, or inconsistent.
+    """
+    raw_path = Path(raw_path).resolve()
+    meta_path = _get_metadata_path(raw_path)
+    
+    if not meta_path.exists():
+        return None
+    
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return None
+    
+    # Verify file hasn't changed
+    try:
+        stat = raw_path.stat()
+        if stat.st_mtime != meta.get("file_mtime"):
+            return None
+        if stat.st_size != meta.get("file_size"):
+            return None
+    except OSError:
+        return None
+    
+    # Verify geometry constraints match
+    if height is not None and meta["geometry"]["height"] != height:
+        return None
+    if width is not None and meta["geometry"]["width"] != width:
+        return None
+    
+    return meta
+
+
+def _save_metadata(raw_path: str | Path, geom: dict) -> None:
+    """Save geometry metadata to cache file."""
+    raw_path = Path(raw_path).resolve()
+    
+    # Create metadata directory alongside the RAW file
+    meta_dir = raw_path.parent / _METADATA_DIR
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    
+    meta_path = _get_metadata_path(raw_path)
+    
+    stat = raw_path.stat()
+    
+    meta = {
+        "file_path": str(raw_path),
+        "file_mtime": stat.st_mtime,
+        "file_size": stat.st_size,
+        "geometry": {
+            "height": geom["height"],
+            "width": geom["width"],
+            "n_frames": geom["n_frames"],
+        },
+        "record_size": geom["record_size"],
+        "frame_size": geom["record_size"] * geom["height"],
+        "frame0_offset": _HEADER_SIZE,
+        "format": "raw",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -212,6 +306,9 @@ def detect_raw_geometry(
     """
     Infer RAW file geometry without reading pixel data.
 
+    Uses cached metadata if available and valid, otherwise detects from
+    file and caches result.
+
     Parameters
     ----------
     path   : RAW file produced by udp_recorder_hdf5.py
@@ -223,6 +320,21 @@ def detect_raw_geometry(
     dict with keys: height, width, n_frames, n_records, record_size, dtype
     """
     path = Path(path)
+    
+    # Check cache first
+    cached = _load_metadata(path, height=height, width=width)
+    if cached is not None:
+        # Reconstruct geometry dict from cached metadata
+        return {
+            "height":    cached["geometry"]["height"],
+            "width":     cached["geometry"]["width"],
+            "n_frames":  cached["geometry"]["n_frames"],
+            "record_size": cached["record_size"],
+            "n_records": cached["geometry"]["n_frames"] * cached["geometry"]["height"],
+            "dtype":     _record_dtype(cached["geometry"]["height"]),
+        }
+    
+    # Detect from file
     with open(path, "rb") as fh:
         magic = fh.read(8)
     if magic != _HEADER_MAGIC:
@@ -235,7 +347,10 @@ def detect_raw_geometry(
                   if (m := _try_geometry(path, data_bytes, h, width)) is not None]
 
     if len(matches) == 1:
-        return matches[0]
+        geom = matches[0]
+        # Cache the result
+        _save_metadata(path, geom)
+        return geom
     if len(matches) > 1:
         choices = ", ".join(f"{m['height']}×{m['width']}" for m in matches)
         raise ValueError(
