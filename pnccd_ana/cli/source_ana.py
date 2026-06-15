@@ -266,7 +266,7 @@ def run(cfg: Config) -> dict:
     # ── Discover and process frames across all files ──────────────────────────
     # Always uses RAW format (512x512 or 1024x512 based on raw_height config)
     from ..utils.io_raw import get_io_module as raw_get_io_module
-    io = raw_get_io_module()
+    io = raw_get_io_module("raw")
 
     raw_kwargs = {}
     if gen.get("raw_height"):
