@@ -125,7 +125,7 @@ def _try_geometry(path: str | Path, data_bytes: int,
     if len(frame_starts) == 1:
         # Only one frame marker at start — use provided candidate_h or infer from n_records
         if candidate_h is not None:
-            # Trust the explicitly provided height
+            # Trust the explicitly provided height (single-frame file or user knows the geometry)
             records_per_frame = candidate_h
         elif n_records in _COMMON_HEIGHTS:
             # Auto-detect: single-frame file where n_records IS the height
@@ -140,7 +140,11 @@ def _try_geometry(path: str | Path, data_bytes: int,
             return None
         records_per_frame = int(gaps[0])
 
-    if records_per_frame <= 0 or n_records % records_per_frame != 0:
+    if records_per_frame <= 0:
+        return None
+    # For multi-frame files, verify records_per_frame is consistent
+    # For single-frame files with explicit candidate_h, trust it (n_records is just file size)
+    if candidate_h is None and n_records % records_per_frame != 0:
         return None
     if not np.array_equal(frame_starts,
                           np.arange(0, n_records, records_per_frame)):
@@ -162,10 +166,16 @@ def _detect_width_from_first_record(path: str | Path) -> int | None:
     """
     Detect frame width W by reading the first record after the 8-byte header.
     Returns None if the file is too short or invalid.
+    
+    Tries all candidate widths and returns the one that produces the correct
+    record alignment for the file size.
     """
     with open(path, "rb") as fh:
         fh.read(8)  # skip header
-        # Read enough for one record: try common widths
+        file_size = fh.seek(0, 2)  # get file size
+        fh.seek(8)  # back to start of data
+        
+        candidates = []
         for w in (256, 512, 768, 1024):
             record_size = 6 + w * 2
             fh.seek(8)
@@ -174,8 +184,24 @@ def _detect_width_from_first_record(path: str | Path) -> int | None:
                 continue
             marker = int.from_bytes(data[0:2], "little")
             if marker in (_FRAME_MARKER, _LINE_MARKER):
+                candidates.append((w, record_size))
+        
+        if not candidates:
+            return None
+        
+        # If only one candidate, return it
+        if len(candidates) == 1:
+            return candidates[0][0]
+        
+        # Multiple candidates - find the one that aligns with file size
+        # The file size (after header) should be a multiple of record_size
+        data_bytes = file_size - 8
+        for w, record_size in candidates:
+            if data_bytes % record_size == 0:
                 return w
-    return None
+        
+        # Fallback: return the first candidate (512 is most common)
+        return 512
 
 
 def detect_raw_geometry(
