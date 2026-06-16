@@ -99,9 +99,12 @@ def plot_offsets(scope_name: str, r: dict, out_dir: Path,
         axes[0, ncols-1].set_ylabel("Y [detector row]")
         _cb(axes[0, ncols-1], im)
         flat = diff.ravel()
-        axes[1, ncols-1].hist(flat, bins=200,
-                               range=(np.percentile(flat, 0.5), np.percentile(flat, 99.5)),
-                               color="coral", edgecolor="none", alpha=0.85)
+        flat_valid = flat[~np.isnan(flat)]
+        if flat_valid.size > 0:
+            axes[1, ncols-1].hist(flat_valid, bins=200,
+                                   range=(np.percentile(flat_valid, 0.5), np.percentile(flat_valid, 99.5)),
+                                   color="coral", edgecolor="none", alpha=0.85)
+            _stats_box(axes[1, ncols-1], flat_valid, fmt=".2f")
         axes[1, ncols-1].set_xlabel("Δ Offset (ADU)")
         axes[1, ncols-1].set_ylabel("Pixel count")
         axes[1, ncols-1].grid(axis="y", alpha=0.3)
