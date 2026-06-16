@@ -400,7 +400,8 @@ class _RawStore:
     def get(cls, path: str | Path,
             height: int | None = None,
             width:  int | None = None) -> "_RawStore":
-        key = str(Path(path).resolve())
+        # Include geometry in cache key to handle different configs
+        key = f"{Path(path).resolve()}::{height}x{width}"
         with cls._lock:
             if key not in cls._cache:
                 cls._cache[key] = cls(path, height, width)
