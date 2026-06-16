@@ -349,14 +349,24 @@ def detect_raw_geometry(
     # Check cache first
     cached = _load_metadata(path, height=height, width=width)
     if cached is not None:
-        # Reconstruct geometry dict from cached metadata
+        # Validate cache by recalculating n_records from actual file size
+        file_size = path.stat().st_size
+        header_size = cached.get("frame0_offset", _HEADER_SIZE)
+        record_size = cached["record_size"]
+        
+        # Calculate actual n_records from file size
+        data_bytes = file_size - header_size
+        n_records_from_file = data_bytes // record_size
+        n_frames_from_file = n_records_from_file // cached["geometry"]["height"]
+        
+        # Reconstruct geometry dict with validated values
         return {
-            "height":    cached["geometry"]["height"],
-            "width":     cached["geometry"]["width"],
-            "n_frames":  cached["geometry"]["n_frames"],
-            "record_size": cached["record_size"],
-            "n_records": cached["geometry"]["n_frames"] * cached["geometry"]["height"],
-            "dtype":     _record_dtype(cached["geometry"]["height"]),
+            "height":      cached["geometry"]["height"],
+            "width":       cached["geometry"]["width"],
+            "n_frames":    n_frames_from_file,
+            "record_size": record_size,
+            "n_records":   n_records_from_file,
+            "dtype":       _record_dtype(cached["geometry"]["height"]),
         }
     
     # Detect from file
