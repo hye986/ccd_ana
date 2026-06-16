@@ -82,10 +82,19 @@ pnccd_ana/
     source_ana.py       ← Stage 3 CLI
   utils/
     io_h5.py            ← HDF5 read/write
-    io_raw.py           ← RAW read/write
+    io_raw.py           ← RAW read/write (with metadata caching)
     plotting.py         ← diagnostics + spectrum plots
   config.py             ← YAML config system
 ```
+
+## RAW file metadata caching
+
+RAW files have metadata cached in `.metadata/` folder alongside the RAW file:
+- `<file>.json` — geometry (height, width, n_frames, record_size)
+- `<file>.frame_offsets.npy` — pre-computed frame record offsets `[0, H, 2H, ...]`
+
+Cache is validated via mtime/size checks and auto-invalidated if source file changes.
+Caching saves ~4.5s on a 5GB file by skipping marker/ADC validation on subsequent runs.
 
 ## Bugs fixed (do not regress)
 
