@@ -196,11 +196,12 @@ def _save_metadata(raw_path: str | Path, geom: dict) -> None:
 # Geometry detection  (shared with view_recording.py / raw_io.py)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _record_dtype(height: int) -> np.dtype:
+def _record_dtype(width: int) -> np.dtype:
+    """Return dtype for a record with the given number of pixels (per row)."""
     return np.dtype([
         ("marker", "<u2"),
         ("adc",    "<u4"),
-        ("pix",    "<u2", (height,)),
+        ("pix",    "<u2", (width,)),
     ])
 
 
@@ -366,7 +367,7 @@ def detect_raw_geometry(
             "n_frames":    n_frames_from_file,
             "record_size": record_size,
             "n_records":   n_records_from_file,
-            "dtype":       _record_dtype(cached["geometry"]["height"]),
+            "dtype":       _record_dtype(cached["geometry"]["width"]),
         }
     
     # Detect from file
