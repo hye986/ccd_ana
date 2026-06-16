@@ -23,20 +23,12 @@ from ..lib    import (compute_offset_median,
                        apply_common_mode_correction,
                        compute_noise,
                        compute_cm_noise,
-                       resolve_asics, split_asics,
                        ASIC_SLICES, ASIC_MASK, ASIC_WIDTH,
                        build_bad_pixel_mask,
                        configure_asics, get_active_mask,
                        _get_masked_names)
 from ..utils  import (save_calibration_h5, save_calibration_npy,
                        plot_offsets, plot_noise, plot_cm_map, plot_bad_pixels)
-
-
-def _h_to_c(name: str) -> str:
-    """Convert H-style ASIC name (H0, H1, ...) to c-style (c0, c1, ...)."""
-    if name.startswith("H") and name[1:].isdigit():
-        return "c" + name[1:]
-    return name
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -185,7 +177,6 @@ def run(cfg: Config) -> dict:
 
     methods  = cfg.methods_for_dark()
     n_sigma  = float(dc["sigma_clip_nsigma"])
-    asics    = cfg.asics_for("dark_frames")
 
     # ── Resolve file list (single path, glob, or list) ────────────────────────
     run_files = _resolve_paths(dark_run_path)
@@ -246,8 +237,8 @@ def run(cfg: Config) -> dict:
     active_asic_slices = {k: v for k, v in ASIC_SLICES.items() if k not in masked_names}
     asic_slices = active_asic_slices if len(active_asic_slices) > 1 else None
 
-    # ── Full-frame analysis ───────────────────────────────────────────────────
-    all_results: dict = {"asics": {}}
+    # ── Full-frame analysis (with per-ASIC CM correction) ─────────────────────
+    all_results: dict = {}
     
     # Create active mask for bad pixel detection and plotting
     active_mask = get_active_mask(data_raw.shape[1], data_raw.shape[2], n_asics, asic_mask)
@@ -256,41 +247,12 @@ def run(cfg: Config) -> dict:
         data_raw, "global", methods, n_sigma, out_dir,
         asic_slices=asic_slices, build_bp_mask=True, active_mask=active_mask)
 
-    # ── Per-ASIC analysis ─────────────────────────────────────────────────────
-    if asics:
-        asic_data = split_asics(data_raw, asics)
-        for aname in asics:
-            # Per-ASIC data uses full width (single ASIC slice), so no active_mask needed
-            all_results["asics"][aname] = _analyse_scope(
-                asic_data[aname], aname, methods, n_sigma, out_dir,
-                asic_slices=None, build_bp_mask=False)
-
-        # ── Generate per-ASIC plots with c-style naming ─────────────────────────
-        for aname in asics:
-            cname = _h_to_c(aname)
-            r = all_results["asics"][aname]
-            asic_dir = out_dir / cname
-            asic_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create a results dict with only the ASIC subset of data
-            asic_r = {k: v for k, v in r.items()
-                      if k in ("offset_median", "offset_sigclip", "noise", 
-                               "cm_noise", "n_clipped_map")}
-            
-            # Plot offset and noise for this ASIC
-            print(f"\n── {cname} (per-ASIC plots) ──")
-            plot_offsets(cname, asic_r, asic_dir)
-            plot_noise(cname, asic_r, asic_dir)
-
-        # ── Save results ──────────────────────────────────────────────────────────
+    # ── Save results ──────────────────────────────────────────────────────────
     def _strip(r: dict) -> dict:
         return {k: v for k, v in r.items()
                 if k not in ("cm_map", "data_corrected", "keep_mask")}
 
-    save_payload = {
-        "global": _strip(all_results["global"]),
-        "asics":  {k: _strip(v) for k, v in all_results["asics"].items()},
-    }
+    save_payload = {"global": _strip(all_results["global"])}
 
     if dc["save_h5"]:
         save_calibration_h5(

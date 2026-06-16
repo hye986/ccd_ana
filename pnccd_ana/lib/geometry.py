@@ -98,7 +98,7 @@ def configure_asics(n_asics: int, width: int, mask: list[int] | None = None) -> 
     
     _N_ASICS = n_asics
     ASIC_WIDTH = width // n_asics
-    ASIC_NAMES = [f"H{i}" for i in range(n_asics)]
+    ASIC_NAMES = [f"C{i}" for i in range(n_asics)]
     ASIC_MASK = set(mask) if mask else set()
     
     # Populate metadata
@@ -108,7 +108,7 @@ def configure_asics(n_asics: int, width: int, mask: list[int] | None = None) -> 
     ASIC_SLICES.clear()
     
     for i in range(n_asics):
-        name = f"H{i}"
+        name = f"C{i}"
         ASIC_LABEL[name] = f"ASIC {i}" + (" (masked)" if i in ASIC_MASK else "")
         ASIC_COLORS[name] = _DEFAULT_COLORS[i % len(_DEFAULT_COLORS)]
         ASIC_GRID_POS[name] = (0, i)
@@ -154,18 +154,18 @@ def resolve_asics(asics: list[str] | None, n_asics: int | None = None) -> list[s
     ----------
     asics   : None / [] -> return all non-masked ASIC names
               list of ASIC names -> validate and return
-              "single" -> return legacy single-hybrid ["H0"]
+              "single" -> return legacy single-hybrid ["C0"]
     n_asics : number of ASICs (for fallback)
 
     Returns None (full-frame mode) or list of ASIC names.
     """
     if asics is None or asics == []:
         # Return all non-masked ASICs
-        return [f"H{i}" for i in range(n_asics or _N_ASICS) if i not in ASIC_MASK]
+        return [f"C{i}" for i in range(n_asics or _N_ASICS) if i not in ASIC_MASK]
     
     if isinstance(asics, str):
         if asics.lower() in ("single", "single_hybrid", "legacy"):
-            return ["H0"]
+            return ["C0"]
         asics = [asics]
     
     result = [a.upper() for a in asics]
@@ -174,14 +174,14 @@ def resolve_asics(asics: list[str] | None, n_asics: int | None = None) -> list[s
     valid_asics = [a for a in result if a in ASIC_SLICES and a not in _get_masked_names()]
     if not valid_asics:
         n = n_asics or _N_ASICS
-        return [f"H{i}" for i in range(n) if i not in ASIC_MASK]
+        return [f"C{i}" for i in range(n) if i not in ASIC_MASK]
     
     return valid_asics
 
 
 def _get_masked_names() -> set[str]:
     """Get set of masked ASIC names."""
-    return {f"H{i}" for i in ASIC_MASK}
+    return {f"C{i}" for i in ASIC_MASK}
 
 
 def split_asics(data, asic_names: list[str]) -> dict[str, object]:

@@ -35,6 +35,10 @@ imshow(arr, origin="lower")  Y=0 at bottom, X=0 at left
 1024×512 — H=1024 rows, W=512 columns (2 ASICs vertically stacked)
 ```
 
+## ASIC naming convention
+ASICs are named C0-C7 (column ASICs, 64 columns each, for 512 total columns).
+Common-mode correction is computed per-ASIC (64 pixels per row).
+
 ## What the package does (4 stages)
 
 **Stage 1 — Dark frame calibration**: raw dark frames → offset maps + noise maps
@@ -107,7 +111,7 @@ Caching saves ~4.5s on a 5GB file by skipping marker/ADC validation on subsequen
    handles the ±2 edge naturally).  Both paths give the same results for
    interior events.  X=0 and X=1 pixels are excluded by BOTH paths (by the
    ±2 border which is larger than the 5×5 window — a conservative design choice
-   with no effect on real pnCCD data since ASIC seams are at X=512, not at X=0/1).
+   with no effect on real pnCCD data since ASIC seams are at X=64, not at X=0/1).
 
 ## Conventions
 

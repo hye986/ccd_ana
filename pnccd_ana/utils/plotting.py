@@ -321,18 +321,18 @@ def plot_cm_map(
         asic_names:  list[str] | None = None,
 ) -> None:
     """
-    (Frame × X) heatmap of CM correction values.
+    (Frame × Y) heatmap of CM correction values.
     
     For per-ASIC CM, shows separate plots for each ASIC.
+    Files are named cm_map_{name}.png (scope is implicit from directory).
     """
     # Handle 3D cm_map (per-ASIC: n_frames, n_Y, n_asics)
     if cm_map.ndim == 3 and asic_names:
         # Per-ASIC CM correction - create one plot per ASIC
-        n_asics = len(asic_names)
         for i, name in enumerate(asic_names):
             asic_cm = cm_map[:, :, i]
             fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-            fig.suptitle(f"Common-Mode Correction — {scope_name} {name}", fontsize=13, fontweight="bold")
+            fig.suptitle(f"Common-Mode Correction — ASIC {name}", fontsize=13, fontweight="bold")
             
             vext = float(np.percentile(np.abs(asic_cm), 99))
             im = axes[0].imshow(asic_cm, origin="lower", cmap="RdBu_r",
@@ -347,7 +347,7 @@ def plot_cm_map(
             axes[1].set_title(f"Frame-Average CM — {name}"); axes[1].grid(alpha=0.3)
             
             plt.tight_layout()
-            p = out_dir / f"cm_map_{scope_name}_{name}.png"
+            p = out_dir / f"cm_map_{name}.png"
             fig.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig)
             print(f"  → {p}")
         return
