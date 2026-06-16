@@ -162,7 +162,7 @@ def _correct_frame(raw: np.ndarray, cal: dict) -> np.ndarray:
     Offset subtract + CM correct one raw frame for single-hybrid.
     """
     full = raw.astype(np.float32) - cal["global"]["offset"]
-    corrected, _ = cm_correct_frame(full)
+    corrected, _, _ = cm_correct_frame(full)
     return corrected
 
 
