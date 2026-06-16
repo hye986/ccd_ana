@@ -24,7 +24,8 @@ from ..lib    import (compute_offset_median,
                        compute_noise,
                        compute_cm_noise,
                        resolve_asics, split_asics,
-                       ASIC_SLICES, ASIC_MASK, build_bad_pixel_mask,
+                       ASIC_SLICES, ASIC_MASK, ASIC_WIDTH,
+                       build_bad_pixel_mask,
                        configure_asics, get_active_mask)
 from ..utils  import (save_calibration_h5, save_calibration_npy,
                        plot_offsets, plot_noise, plot_cm_map, plot_bad_pixels)
