@@ -24,9 +24,10 @@ from ..lib    import (compute_offset_median,
                        compute_noise,
                        compute_cm_noise,
                        resolve_asics, split_asics,
-                       ASIC_SLICES, ALL_ASICS)
+                       ASIC_SLICES, build_bad_pixel_mask,
+                       N_ASICS, ASIC_WIDTH)
 from ..utils  import (save_calibration_h5, save_calibration_npy,
-                       plot_offsets, plot_noise, plot_cm_map)
+                       plot_offsets, plot_noise, plot_cm_map, plot_bad_pixels)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -37,9 +38,11 @@ def _analyse_scope(data:        np.ndarray,
                    label:       str,
                    methods:     list[str],
                    n_sigma:     float,
-                   out_dir:     Path) -> dict:
+                   out_dir:     Path,
+                   asic_slices: dict[str, tuple[int, int, int, int]] | None = None,
+                   build_bp_mask: bool = True) -> dict:
     """
-    Run pedestal → CM → noise pipeline for one data block (single-hybrid).
+    Run pedestal → CM → noise pipeline for one data block.
 
     Parameters
     ----------
@@ -48,10 +51,12 @@ def _analyse_scope(data:        np.ndarray,
     methods    : ['median'], ['sigclip'], or both
     n_sigma    : sigma-clip threshold
     out_dir    : output directory
+    asic_slices: dict mapping ASIC name to (Y0, Y1, X0, X1) for per-ASIC CM
+    build_bp_mask: whether to build bad pixel mask and plot it
 
     Returns dict with keys: offset_median?, offset_sigclip?,
                              noise, cm_noise, n_clipped_map?,
-                             cm_map, data_corrected
+                             cm_map, data_corrected, bad_pixel_mask?
     """
     print(f"\n── {label} ──")
     r: dict       = {}
@@ -66,17 +71,41 @@ def _analyse_scope(data:        np.ndarray,
         r["n_clipped_map"] = n_clipped_map
 
     ref_offset = r.get("offset_sigclip", r.get("offset_median"))
-    corrected, cm_map   = apply_common_mode_correction(data, ref_offset, label)
+    corrected, cm_map, asic_names = apply_common_mode_correction(
+        data, ref_offset, label, asic_slices=asic_slices)
     r["noise"]          = compute_noise(corrected, keep_mask, label)
-    r["cm_noise"]       = compute_cm_noise(cm_map, label)
+    
+    # Handle both dict and array cm_noise
+    cm_noise = compute_cm_noise(cm_map, label, asic_names=asic_names)
+    if isinstance(cm_noise, dict):
+        r["cm_noise"] = cm_noise.get(list(cm_noise.keys())[0] if cm_noise else "global")
+    else:
+        r["cm_noise"] = cm_noise
+    
     r["cm_map"]         = cm_map
+    r["asic_names"]     = asic_names
     r["data_corrected"] = corrected
+
+    # Build bad pixel mask if requested
+    bad_pixel_mask = None
+    if build_bp_mask:
+        bad_pixel_mask = build_bad_pixel_mask(
+            r["noise"],
+            n_clipped_map=n_clipped_map,
+            n_dark_frames=data.shape[0] if n_clipped_map is not None else 0,
+            active_mask=None,  # full frame is active
+            label=label,
+        )
+        r["bad_pixel_mask"] = bad_pixel_mask
 
     scope_dir = out_dir / label
     scope_dir.mkdir(parents=True, exist_ok=True)
     plot_offsets(label, r, scope_dir)
     plot_noise(label, r, scope_dir)
-    plot_cm_map(label, cm_map, scope_dir)
+    plot_cm_map(label, cm_map, scope_dir, asic_names=asic_names)
+    
+    if build_bp_mask and bad_pixel_mask is not None:
+        plot_bad_pixels(label, r["noise"], bad_pixel_mask, scope_dir)
 
     return r
 
@@ -196,17 +225,22 @@ def run(cfg: Config) -> dict:
     from ..lib.geometry import _update_asic_slices
     _update_asic_slices(data_raw.shape[1], data_raw.shape[2])
 
+    # Use per-ASIC CM correction for multi-ASIC detectors
+    asic_slices = ASIC_SLICES if len(ASIC_SLICES) > 1 else None
+
     # ── Full-frame analysis ───────────────────────────────────────────────────
     all_results: dict = {"asics": {}}
     all_results["global"] = _analyse_scope(
-        data_raw, "global", methods, n_sigma, out_dir)
+        data_raw, "global", methods, n_sigma, out_dir,
+        asic_slices=asic_slices, build_bp_mask=True)
 
     # ── Per-ASIC analysis ─────────────────────────────────────────────────────
     if asics:
         asic_data = split_asics(data_raw, asics)
         for aname in asics:
             all_results["asics"][aname] = _analyse_scope(
-                asic_data[aname], aname, methods, n_sigma, out_dir)
+                asic_data[aname], aname, methods, n_sigma, out_dir,
+                asic_slices=None, build_bp_mask=False)  # Per-ASIC data already uses single ASIC
 
         # ── Save results ──────────────────────────────────────────────────────────
     def _strip(r: dict) -> dict:

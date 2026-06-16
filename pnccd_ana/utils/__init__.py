@@ -13,7 +13,7 @@ from .io_raw  import (get_frame_indices  as raw_get_frame_indices,
                        get_io_module)
                     
 from .plotting import (plot_offsets, plot_noise, plot_cm_map,
-                        plot_hitmap,
+                        plot_hitmap, plot_bad_pixels,
                         plot_spectrum, plot_grade_distribution,
                         plot_raw_spectrum
                        )

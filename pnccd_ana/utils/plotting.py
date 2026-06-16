@@ -153,8 +153,186 @@ def plot_noise(scope_name: str, r: dict, out_dir: Path) -> None:
     print(f"  → {p}")
 
 
-def plot_cm_map(scope_name: str, cm_map: np.ndarray, out_dir: Path) -> None:
-    """(Frame × X) heatmap of CM correction values."""
+def plot_bad_pixels(
+        scope_name:   str,
+        noise_map:    np.ndarray,
+        bad_mask:     np.ndarray,
+        out_dir:      Path,
+        active_mask:  np.ndarray | None = None,
+) -> None:
+    """
+    Visualize bad pixel detection results.
+    
+    Shows:
+    - Noise map with bad pixels overlaid
+    - Bad pixel categories (hot, cold, clipped)
+    - Per-ASIC statistics
+    
+    Parameters
+    ----------
+    scope_name  : label for the scope (e.g., "global", "H0")
+    noise_map   : float (Y, X) — per-pixel RMS
+    bad_mask    : bool  (Y, X) — True where pixel is bad
+    out_dir     : output directory
+    active_mask : bool  (Y, X) — True where pixel is in active region
+    """
+    Y, X = noise_map.shape
+    
+    # Categorize bad pixels
+    nonfinite = ~np.isfinite(noise_map)
+    nonpositive = (noise_map <= 0) & (active_mask if active_mask is not None else np.ones_like(noise_map, dtype=bool))
+    
+    ref = noise_map[active_mask & np.isfinite(noise_map) & (noise_map > 0)]
+    if ref.size > 0:
+        med = float(np.median(ref))
+    else:
+        med = 1.0
+    
+    # Hot: noise > 5x median (using the same thresholds as build_bad_pixel_mask)
+    hot_thr = 5.0 * med
+    cold_thr = 0.1 * med
+    
+    hot_mask = (noise_map > hot_thr) & active_mask if active_mask is not None else (noise_map > hot_thr)
+    cold_mask = (noise_map < cold_thr) & np.isfinite(noise_map) & active_mask if active_mask is not None else (noise_map < cold_thr) & np.isfinite(noise_map)
+    
+    n_hot = int(hot_mask.sum())
+    n_cold = int(cold_mask.sum())
+    n_nonfinite = int((nonfinite & (active_mask if active_mask is not None else np.ones_like(noise_map, dtype=bool))).sum())
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    fig.suptitle(f"Bad Pixel Analysis — {scope_name}", fontsize=13, fontweight="bold")
+    
+    # Panel 1: Noise map with bad pixels overlaid
+    ax = axes[0, 0]
+    im = ax.imshow(noise_map, origin="lower", cmap="viridis",
+                   vmin=0, vmax=float(np.percentile(noise_map[np.isfinite(noise_map)], 99)),
+                   aspect="auto")
+    ax.set_title("Noise Map (with bad pixels marked)")
+    ax.set_xlabel("X [detector column]"); ax.set_ylabel("Y [detector row]")
+    _cb(ax, im, "ADU RMS")
+    
+    # Overlay bad pixels in red
+    bad_overlay = np.zeros((*bad_mask.shape, 4), dtype=np.float32)
+    bad_overlay[bad_mask, 0] = 1.0  # Red channel
+    bad_overlay[bad_mask, 3] = 0.7  # Alpha
+    ax.imshow(bad_overlay, origin="lower", aspect="auto")
+    
+    # Panel 2: Bad pixel categorization map
+    ax = axes[0, 1]
+    cat_map = np.zeros((Y, X), dtype=int)
+    cat_map[hot_mask] = 1        # Hot
+    cat_map[cold_mask] = 2       # Cold
+    cat_map[nonfinite] = 3       # Non-finite
+    cat_map[bad_mask & ~hot_mask & ~cold_mask & ~nonfinite] = 4  # Other bad
+    
+    # Custom colormap: 0=good (transparent), 1=hot (red), 2=cold (blue), 3=nonfinite (purple), 4=other (gray)
+    from matplotlib.colors import ListedColormap
+    colors = ['green', 'red', 'blue', 'purple', 'gray']
+    cmap = ListedColormap(colors)
+    bounds = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
+    
+    im = ax.imshow(cat_map, origin="lower", cmap=cmap, vmin=-0.5, vmax=4.5, aspect="auto")
+    ax.set_title("Bad Pixel Categories")
+    ax.set_xlabel("X [detector column]"); ax.set_ylabel("Y [detector row]")
+    
+    # Custom legend
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='green', label=f'Good ({int((~bad_mask).sum())})'),
+        Patch(facecolor='red', label=f'Hot (>{hot_thr:.1f} RMS) ({n_hot})'),
+        Patch(facecolor='blue', label=f'Cold (<{cold_thr:.2f} RMS) ({n_cold})'),
+        Patch(facecolor='purple', label=f'Non-finite ({n_nonfinite})'),
+        Patch(facecolor='gray', label=f'Other ({int(bad_mask.sum()) - n_hot - n_cold - n_nonfinite})'),
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
+    
+    # Panel 3: Noise distribution with thresholds marked
+    ax = axes[1, 0]
+    flat = noise_map[np.isfinite(noise_map) & (noise_map > 0)].ravel()
+    ax.hist(flat, bins=200, range=(0, float(np.percentile(flat, 99.5))),
+            color="steelblue", edgecolor="none", alpha=0.85)
+    ax.axvline(med, color='green', lw=2, ls='-', label=f'Median ({med:.2f})')
+    ax.axvline(hot_thr, color='red', lw=2, ls='--', label=f'Hot threshold ({hot_thr:.2f})')
+    ax.axvline(cold_thr, color='blue', lw=2, ls='--', label=f'Cold threshold ({cold_thr:.3f})')
+    ax.set_xlabel("Noise (ADU RMS)"); ax.set_ylabel("Pixel count")
+    ax.set_title("Noise Distribution with Bad Pixel Thresholds")
+    ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3)
+    
+    # Panel 4: Per-ASIC bad pixel statistics
+    ax = axes[1, 1]
+    asic_width = 64
+    n_asics = X // asic_width
+    
+    asic_stats = []
+    asic_labels = []
+    for i in range(n_asics):
+        x0, x1 = i * asic_width, (i + 1) * asic_width
+        asic_bad = bad_mask[:, x0:x1].sum()
+        asic_total = x1 - x0
+        asic_active = (active_mask[:, x0:x1] if active_mask is not None else np.ones((Y, asic_width), dtype=bool))[:, x0:x1].sum()
+        asic_stats.append(asic_bad)
+        asic_labels.append(f'ASIC{i}')
+    
+    bars = ax.bar(asic_labels, asic_stats, color='tomato', edgecolor='white')
+    ax.set_xlabel("ASIC"); ax.set_ylabel("Bad Pixel Count")
+    ax.set_title("Bad Pixels per ASIC")
+    ax.grid(axis="y", alpha=0.3)
+    for bar, cnt in zip(bars, asic_stats):
+        ax.text(bar.get_x() + bar.get_width()/2, cnt + 5,
+                f"{cnt}", ha='center', va='bottom', fontsize=9)
+    
+    # Summary text
+    total_bad = int(bad_mask.sum())
+    total_pixels = int(active_mask.sum()) if active_mask is not None else X * Y
+    summary = f"Total bad: {total_bad}/{total_pixels} ({100*total_bad/total_pixels:.2f}%)"
+    fig.text(0.5, 0.02, summary, ha='center', fontsize=11, 
+             bbox=dict(boxstyle="round", fc="wheat", alpha=0.8))
+    
+    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+    p = out_dir / f"bad_pixels_{scope_name}.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig)
+    print(f"  → {p}")
+
+
+def plot_cm_map(
+        scope_name:  str,
+        cm_map:      np.ndarray,
+        out_dir:     Path,
+        asic_names:  list[str] | None = None,
+) -> None:
+    """
+    (Frame × X) heatmap of CM correction values.
+    
+    For per-ASIC CM, shows separate plots for each ASIC.
+    """
+    # Handle 3D cm_map (per-ASIC: n_frames, n_Y, n_asics)
+    if cm_map.ndim == 3 and asic_names:
+        # Per-ASIC CM correction - create one plot per ASIC
+        n_asics = len(asic_names)
+        for i, name in enumerate(asic_names):
+            asic_cm = cm_map[:, :, i]
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            fig.suptitle(f"Common-Mode Correction — {scope_name} {name}", fontsize=13, fontweight="bold")
+            
+            vext = float(np.percentile(np.abs(asic_cm), 99))
+            im = axes[0].imshow(asic_cm, origin="lower", cmap="RdBu_r",
+                                 vmin=-vext, vmax=vext, aspect="auto")
+            axes[0].set_xlabel("Y [detector row]"); axes[0].set_ylabel("Frame index")
+            axes[0].set_title(f"CM Value per (Frame, Detector Row) — {name}")
+            _cb(axes[0], im)
+
+            axes[1].plot(asic_cm.mean(axis=1), lw=0.8, color="slateblue")
+            axes[1].axhline(0, color="k", lw=0.5, ls="--")
+            axes[1].set_xlabel("Frame index"); axes[1].set_ylabel("Mean CM (ADU)")
+            axes[1].set_title(f"Frame-Average CM — {name}"); axes[1].grid(alpha=0.3)
+            
+            plt.tight_layout()
+            p = out_dir / f"cm_map_{scope_name}_{name}.png"
+            fig.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig)
+            print(f"  → {p}")
+        return
+    
+    # Legacy 2D cm_map (n_frames, n_Y)
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle(f"Common-Mode Correction — {scope_name}", fontsize=13, fontweight="bold")
 
