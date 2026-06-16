@@ -90,10 +90,13 @@ _HEADER_SIZE   = 8            # bytes in file header
 _METADATA_DIR = ".metadata"
 
 
-def _get_metadata_path(raw_path: str | Path) -> Path:
-    """Get path to metadata cache file for a RAW file."""
+def _get_metadata_paths(raw_path: str | Path) -> tuple[Path, Path]:
+    """Get paths to metadata cache files (JSON + numpy offsets)."""
     raw_path = Path(raw_path).resolve()
-    return raw_path.parent / _METADATA_DIR / f"{raw_path.name}.json"
+    meta_dir = raw_path.parent / _METADATA_DIR
+    json_path = meta_dir / f"{raw_path.name}.json"
+    offsets_path = meta_dir / f"{raw_path.name}.frame_offsets.npy"
+    return json_path, offsets_path
 
 
 def _load_metadata(raw_path: str | Path,
@@ -106,18 +109,18 @@ def _load_metadata(raw_path: str | Path,
     Returns None if cache is missing, stale, inconsistent, or fails validation.
     """
     raw_path = Path(raw_path).resolve()
-    meta_path = _get_metadata_path(raw_path)
+    json_path, offsets_path = _get_metadata_paths(raw_path)
     
-    if not meta_path.exists():
+    if not json_path.exists():
         return None
     
     try:
-        with open(meta_path) as f:
+        with open(json_path) as f:
             meta = json.load(f)
     except (json.JSONDecodeError, IOError):
         return None
     
-    # Verify file hasn't changed
+    # Verify file hasn't changed (fast stat check)
     try:
         stat = raw_path.stat()
         if stat.st_mtime != meta.get("file_mtime"):
@@ -134,61 +137,66 @@ def _load_metadata(raw_path: str | Path,
         return None
     
     # Validate cached record_size against actual file size
-    # This ensures the cached geometry is consistent with the file
     file_size = stat.st_size
     header_size = meta.get("frame0_offset", _HEADER_SIZE)
     record_size = meta.get("record_size", 0)
     cached_height = meta["geometry"]["height"]
     cached_n_frames = meta["geometry"]["n_frames"]
     
-    # Calculate expected total records and bytes
     total_records = cached_n_frames * cached_height
     expected_file_size = header_size + (total_records * record_size)
     
-    # Debug output
-    print(f"    [cache] file_size={file_size}, expected={expected_file_size}, "
-          f"height={cached_height}, n_frames={cached_n_frames}, record_size={record_size}")
-    
-    # Check if cached geometry matches actual file size
-    # Allow small tolerance (1 record) for edge cases
     if abs(expected_file_size - file_size) > record_size:
-        # Cached geometry doesn't match file - re-detect
-        print(f"    [cache] REJECTED - geometry mismatch")
         return None
     
-    print(f"    [cache] ACCEPTED")
+    # Load pre-computed frame record offsets if available (fast numpy load)
+    if offsets_path.exists():
+        try:
+            meta["_frame_record_offsets"] = np.load(offsets_path, mmap_mode="r")
+        except Exception:
+            meta["_frame_record_offsets"] = None
+    else:
+        meta["_frame_record_offsets"] = None
+    
     return meta
 
 
 def _save_metadata(raw_path: str | Path, geom: dict) -> None:
-    """Save geometry metadata to cache file."""
+    """Save geometry metadata and pre-computed frame offsets to cache files."""
     raw_path = Path(raw_path).resolve()
     
-    # Create metadata directory alongside the RAW file
     meta_dir = raw_path.parent / _METADATA_DIR
     meta_dir.mkdir(parents=True, exist_ok=True)
     
-    meta_path = _get_metadata_path(raw_path)
-    
+    json_path, offsets_path = _get_metadata_paths(raw_path)
     stat = raw_path.stat()
+    
+    H = geom["height"]
+    n_frames = geom["n_frames"]
+    frame_size = geom["record_size"] * H
+    header_size = _HEADER_SIZE
+    
+    # Pre-compute frame record offsets: [0, H, 2H, 3H, ...]
+    frame_record_offsets = np.arange(n_frames, dtype=np.int64) * H
+    np.save(offsets_path, frame_record_offsets)
     
     meta = {
         "file_path": str(raw_path),
         "file_mtime": stat.st_mtime,
         "file_size": stat.st_size,
         "geometry": {
-            "height": geom["height"],
+            "height": H,
             "width": geom["width"],
-            "n_frames": geom["n_frames"],
+            "n_frames": n_frames,
         },
         "record_size": geom["record_size"],
-        "frame_size": geom["record_size"] * geom["height"],
-        "frame0_offset": _HEADER_SIZE,
+        "frame_size": frame_size,
+        "frame0_offset": header_size,
         "format": "raw",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     
-    with open(meta_path, "w") as f:
+    with open(json_path, "w") as f:
         json.dump(meta, f, indent=2)
 
 
@@ -361,6 +369,7 @@ def detect_raw_geometry(
         n_frames_from_file = n_records_from_file // cached["geometry"]["height"]
         
         # Reconstruct geometry dict with validated values
+        # Include cached frame record offsets if available
         return {
             "height":      cached["geometry"]["height"],
             "width":       cached["geometry"]["width"],
@@ -368,6 +377,7 @@ def detect_raw_geometry(
             "record_size": record_size,
             "n_records":   n_records_from_file,
             "dtype":       _record_dtype(cached["geometry"]["width"]),
+            "_frame_record_offsets": cached.get("_frame_record_offsets"),
         }
     
     # Detect from file
@@ -404,10 +414,10 @@ def detect_raw_geometry(
 
 class _RawStore:
     """
-    Caches the memmap and geometry for one RAW file.
+    Caches the memmap, geometry, and frame offsets for one RAW file.
 
     The pixel memmap is read-only and safe to share across threads.
-    Indexing store[i] returns frame i as uint16 (height, width).
+    Uses pre-computed frame offsets when available (from cache).
     """
 
     _cache: dict[str, "_RawStore"] = {}
@@ -417,7 +427,6 @@ class _RawStore:
     def get(cls, path: str | Path,
             height: int | None = None,
             width:  int | None = None) -> "_RawStore":
-        # Include geometry in cache key to handle different configs
         key = f"{Path(path).resolve()}::{height}x{width}"
         with cls._lock:
             if key not in cls._cache:
@@ -438,6 +447,13 @@ class _RawStore:
         # Full memmap of the record array (header already skipped via offset=8)
         self._recs = np.memmap(path, dtype=dtype, mode="r",
                                offset=8, shape=(n_records,))
+        
+        # Pre-computed frame record offsets (from cache) or computed on-demand
+        if "_frame_record_offsets" in geom:
+            self._frame_offsets = geom["_frame_record_offsets"]
+        else:
+            # Compute record offsets: each frame starts at frame_index * height
+            self._frame_offsets = np.arange(self.n, dtype=np.int64) * self.height
 
     def get_frames(self, indices: np.ndarray) -> np.ndarray:
         """
@@ -446,7 +462,7 @@ class _RawStore:
         Indices must be in [0, n_frames).  Order is preserved.
         
         Optimized for large files: reads contiguous memory regions instead of
-        iterating row-by-row.
+        iterating row-by-row. Uses pre-computed frame offsets.
         """
         W  = self.width
         H  = self.height
@@ -454,9 +470,9 @@ class _RawStore:
         out = np.empty((n, H, W), dtype=np.float32)
         
         for i, fi in enumerate(indices):
-            rec_start = int(fi) * H
+            # Use pre-computed offset to find frame start
+            rec_start = int(self._frame_offsets[fi])
             # Read H consecutive rows as a contiguous block and extract pixels
-            # This is much faster than iterating row-by-row
             frame_rows = self._recs[rec_start:rec_start + H]["pix"]
             out[i] = np.ascontiguousarray(frame_rows, dtype=np.float32)
         
