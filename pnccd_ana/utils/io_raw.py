@@ -102,21 +102,9 @@ def _load_metadata(raw_path: str | Path,
     """
     Load cached metadata if valid and consistent with current file.
     
-    IMPORTANT: Caching is only used when geometry is explicitly specified.
-    When height=None (auto-detect), the cache is ignored to prevent using
-    stale metadata from previous runs with different settings.
-    
-    Returns None if:
-    - Cache doesn't exist
-    - File was modified (mtime changed)
-    - File size changed
-    - Explicit height/width don't match cached values
-    - Geometry was auto-detected (no caching for safety)
+    The cache is validated against the actual file to ensure geometry matches.
+    Returns None if cache is missing, stale, inconsistent, or fails validation.
     """
-    # Never use cache for auto-detect - safety first
-    if height is None and width is None:
-        return None
-    
     raw_path = Path(raw_path).resolve()
     meta_path = _get_metadata_path(raw_path)
     
@@ -139,10 +127,28 @@ def _load_metadata(raw_path: str | Path,
     except OSError:
         return None
     
-    # Verify geometry constraints match
+    # Verify geometry constraints match if explicitly specified
     if height is not None and meta["geometry"]["height"] != height:
         return None
     if width is not None and meta["geometry"]["width"] != width:
+        return None
+    
+    # Validate cached record_size against actual file size
+    # This ensures the cached geometry is consistent with the file
+    file_size = stat.st_size
+    header_size = meta.get("frame0_offset", _HEADER_SIZE)
+    record_size = meta.get("record_size", 0)
+    cached_height = meta["geometry"]["height"]
+    cached_n_frames = meta["geometry"]["n_frames"]
+    
+    # Calculate expected total records and bytes
+    total_records = cached_n_frames * cached_height
+    expected_file_size = header_size + (total_records * record_size)
+    
+    # Check if cached geometry matches actual file size
+    # Allow small tolerance (1 record) for edge cases
+    if abs(expected_file_size - file_size) > record_size:
+        # Cached geometry doesn't match file - re-detect
         return None
     
     return meta
