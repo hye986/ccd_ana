@@ -102,8 +102,21 @@ def _load_metadata(raw_path: str | Path,
     """
     Load cached metadata if valid and consistent with current file.
     
-    Returns None if cache is missing, stale, or inconsistent.
+    IMPORTANT: Caching is only used when geometry is explicitly specified.
+    When height=None (auto-detect), the cache is ignored to prevent using
+    stale metadata from previous runs with different settings.
+    
+    Returns None if:
+    - Cache doesn't exist
+    - File was modified (mtime changed)
+    - File size changed
+    - Explicit height/width don't match cached values
+    - Geometry was auto-detected (no caching for safety)
     """
+    # Never use cache for auto-detect - safety first
+    if height is None and width is None:
+        return None
+    
     raw_path = Path(raw_path).resolve()
     meta_path = _get_metadata_path(raw_path)
     
