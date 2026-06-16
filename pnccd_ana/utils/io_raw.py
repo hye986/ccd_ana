@@ -145,12 +145,18 @@ def _load_metadata(raw_path: str | Path,
     total_records = cached_n_frames * cached_height
     expected_file_size = header_size + (total_records * record_size)
     
+    # Debug output
+    print(f"    [cache] file_size={file_size}, expected={expected_file_size}, "
+          f"height={cached_height}, n_frames={cached_n_frames}, record_size={record_size}")
+    
     # Check if cached geometry matches actual file size
     # Allow small tolerance (1 record) for edge cases
     if abs(expected_file_size - file_size) > record_size:
         # Cached geometry doesn't match file - re-detect
+        print(f"    [cache] REJECTED - geometry mismatch")
         return None
     
+    print(f"    [cache] ACCEPTED")
     return meta
 
 
