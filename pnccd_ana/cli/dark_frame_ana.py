@@ -32,6 +32,13 @@ from ..utils  import (save_calibration_h5, save_calibration_npy,
                        plot_offsets, plot_noise, plot_cm_map, plot_bad_pixels)
 
 
+def _h_to_c(name: str) -> str:
+    """Convert H-style ASIC name (H0, H1, ...) to c-style (c0, c1, ...)."""
+    if name.startswith("H") and name[1:].isdigit():
+        return "c" + name[1:]
+    return name
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Per-scope analysis (single-hybrid)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -257,6 +264,23 @@ def run(cfg: Config) -> dict:
             all_results["asics"][aname] = _analyse_scope(
                 asic_data[aname], aname, methods, n_sigma, out_dir,
                 asic_slices=None, build_bp_mask=False)
+
+        # ── Generate per-ASIC plots with c-style naming ─────────────────────────
+        for aname in asics:
+            cname = _h_to_c(aname)
+            r = all_results["asics"][aname]
+            asic_dir = out_dir / cname
+            asic_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create a results dict with only the ASIC subset of data
+            asic_r = {k: v for k, v in r.items()
+                      if k in ("offset_median", "offset_sigclip", "noise", 
+                               "cm_noise", "n_clipped_map")}
+            
+            # Plot offset and noise for this ASIC
+            print(f"\n── {cname} (per-ASIC plots) ──")
+            plot_offsets(cname, asic_r, asic_dir)
+            plot_noise(cname, asic_r, asic_dir)
 
         # ── Save results ──────────────────────────────────────────────────────────
     def _strip(r: dict) -> dict:
