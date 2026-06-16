@@ -449,8 +449,9 @@ class _RawStore:
                                offset=8, shape=(n_records,))
         
         # Pre-computed frame record offsets (from cache) or computed on-demand
-        if "_frame_record_offsets" in geom:
-            self._frame_offsets = geom["_frame_record_offsets"]
+        cached_offsets = geom.get("_frame_record_offsets")
+        if cached_offsets is not None:
+            self._frame_offsets = cached_offsets
         else:
             # Compute record offsets: each frame starts at frame_index * height
             self._frame_offsets = np.arange(self.n, dtype=np.int64) * self.height
