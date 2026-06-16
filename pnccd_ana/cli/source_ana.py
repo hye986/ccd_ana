@@ -424,15 +424,6 @@ def run(cfg: Config) -> dict:
         plot_spectrum(spectra, bin_edges, out_dir, events=events)
         if len(events):
             plot_grade_distribution(events, out_dir)
-            plot_spectrum_comparison(
-                events=events,
-                corrected_frames=np.zeros((1,1,1), dtype=np.float32),  # unused now
-                noise_map=noise_map,
-                bin_edges=bin_edges,
-                out_dir=out_dir,
-                seed_sigma=seed_sigma,
-                title_suffix="global",
-            )
 
         # Raw pixel-level spectrum (needs sample frames)
         if sample_buf:

@@ -84,6 +84,7 @@ _DEFAULTS: dict[str, Any] = {
         "chunk_size":       64,            # frames per chunk
         "max_frames":       None,          # null = all
         "complete_only":    True,          # skip incomplete last frame
+        "save_frame_plots": True,          # generate diagnostic plots
         "metadata":         {},
     },
     "dark_frames": {
@@ -283,6 +284,7 @@ general:
   chunk_size: 64                    # frames per chunk
   max_frames: null                  # null = all frames
   complete_only: true               # skip incomplete last frame
+  save_frame_plots: true            # generate diagnostic plots (hitmap, spectrum, etc.)
   metadata:
     operator: ""
     sample: ""
