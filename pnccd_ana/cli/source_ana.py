@@ -18,7 +18,10 @@ import numpy as np
 from ..config import Config
 from ..lib    import (find_events,
                        N_GRADES, EVENT_DTYPE,
-                       build_bad_pixel_mask)
+                       build_bad_pixel_mask,
+                       ASIC_SLICES, ASIC_WIDTH,
+                       configure_asics, get_active_mask,
+                       _get_masked_names)
 from ..lib.common_mode import cm_correct_frame
 from ..utils  import (load_calibration_h5, load_calibration_npy,
                        save_events_h5,
@@ -124,7 +127,8 @@ def _make_worker(cal: dict,
                  search_mask: np.ndarray | None,
                  bad_pixel_mask: np.ndarray | None = None,
                  sample_buf: list | None = None,
-                 sample_max: int = 50):
+                 sample_max: int = 50,
+                 asic_slices: dict | None = None):
     """
     Return a closure suitable for process_frames_mt for single-hybrid mode.
     """
@@ -135,7 +139,7 @@ def _make_worker(cal: dict,
                 frame_indices: np.ndarray) -> np.ndarray:
         chunk_events: list[np.ndarray] = []
         for frame in raw_chunk:
-            corrected = _correct_frame(frame, cal)
+            corrected = _correct_frame(frame, cal, asic_slices=asic_slices)
 
             # Collect sample frames for raw spectrum (cheap copy of one frame)
             if sample_buf is not None:
@@ -157,12 +161,15 @@ def _make_worker(cal: dict,
     return _worker
 
 
-def _correct_frame(raw: np.ndarray, cal: dict) -> np.ndarray:
+def _correct_frame(raw: np.ndarray, cal: dict,
+                   asic_slices: dict | None = None) -> np.ndarray:
     """
     Offset subtract + CM correct one raw frame for single-hybrid.
+    
+    If asic_slices is provided, CM correction is applied per-ASIC.
     """
     full = raw.astype(np.float32) - cal["global"]["offset"]
-    corrected, _, _ = cm_correct_frame(full)
+    corrected, _, _ = cm_correct_frame(full, asic_slices=asic_slices)
     return corrected
 
 
@@ -257,11 +264,23 @@ def run(cfg: Config) -> dict:
     noise_map = _build_noise_map(cal, noise_scope=noise_scope)
     H, W = noise_map.shape
 
-    # ── Build search mask (all pixels active for single-hybrid) ─────────────
-    search_mask: np.ndarray | None = None
+    # ── Configure ASIC geometry ───────────────────────────────────────────────
+    n_asics = int(gen.get("ASIC_num", 8))
+    asic_mask = gen.get("ASIC_mask", [])
+    configure_asics(n_asics, W, mask=asic_mask)
+    
+    # Build per-ASIC CM slices (exclude masked ASICs)
+    masked_names = _get_masked_names()
+    active_asic_slices = {k: v for k, v in ASIC_SLICES.items() if k not in masked_names}
+    asic_slices = active_asic_slices if len(active_asic_slices) > 1 else None
+
+    # ── Build search mask (respects ASIC mask) ──────────────────────────────
+    # Create active mask that excludes masked ASICs
+    active_mask = get_active_mask(H, W, n_asics, asic_mask)
+    search_mask: np.ndarray | None = active_mask
 
     # ── Build bad-pixel mask from calibration ─────────────────────────────────
-    bad_pixel_mask = _build_bad_pixel_mask(cal, noise_map=noise_map, search_mask=search_mask,
+    bad_pixel_mask = _build_bad_pixel_mask(cal, noise_map=noise_map, search_mask=active_mask,
                                             user_cfg=sc.get("bad_pixel_mask"))
     if bad_pixel_mask is not None and bool(bad_pixel_mask.any()):
         np.save(out_dir / "bad_pixel_mask.npy", bad_pixel_mask)
@@ -283,6 +302,12 @@ def run(cfg: Config) -> dict:
     if gen.get("frame_cols"):
         raw_kwargs["width"] = gen["frame_cols"]
 
+    # Print ASIC configuration
+    if asic_mask:
+        print(f"  ASIC mask applied: excluding ASICs {asic_mask}")
+    print(f"  ASIC configuration: {n_asics} ASICs × {ASIC_WIDTH} columns = {W} total columns")
+    print(f"  Per-ASIC CM correction: {'enabled' if asic_slices else 'disabled'}")
+
     # Sample buffer for raw spectrum plots (collect up to 200 corrected frames)
     # Shared across all input files — worker appends to it as frames are processed.
     sample_buf: list = []
@@ -291,7 +316,8 @@ def run(cfg: Config) -> dict:
                           seed_sigma, split_sigma, reject_extra,
                           search_mask,
                           bad_pixel_mask=bad_pixel_mask,
-                          sample_buf=sample_buf, sample_max=200)
+                          sample_buf=sample_buf, sample_max=200,
+                          asic_slices=asic_slices)
 
     all_results: list[np.ndarray] = []
     remaining = gen["max_frames"]   # None = unlimited; decremented per file
