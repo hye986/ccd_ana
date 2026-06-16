@@ -51,7 +51,8 @@ def _asic_guides(ax):
 # Dark-frame calibration plots
 # ──────────────────────────────────────────────────────────────────────────────
 
-def plot_offsets(scope_name: str, r: dict, out_dir: Path) -> None:
+def plot_offsets(scope_name: str, r: dict, out_dir: Path,
+                 active_mask: np.ndarray | None = None) -> None:
     """2-D offset maps + histograms for both/either method."""
     present = []
     if "offset_median"  in r: present.append(("Median",     r["offset_median"]))
@@ -68,7 +69,12 @@ def plot_offsets(scope_name: str, r: dict, out_dir: Path) -> None:
     vmin, vmax = np.percentile(all_vals, [1, 99])
 
     for col, (mname, arr) in enumerate(present):
-        im = axes[0, col].imshow(arr, origin="lower", cmap="viridis",
+        # Apply masked region visualization
+        disp = arr.copy()
+        if active_mask is not None:
+            disp = np.where(active_mask, disp, np.nan)
+        
+        im = axes[0, col].imshow(disp, origin="lower", cmap="viridis",
                                   vmin=vmin, vmax=vmax, aspect="auto")
         axes[0, col].set_title(mname, fontsize=10)
         axes[0, col].set_xlabel("X [detector column]")
@@ -83,6 +89,8 @@ def plot_offsets(scope_name: str, r: dict, out_dir: Path) -> None:
 
     if show_diff:
         diff   = present[0][1] - present[1][1]
+        if active_mask is not None:
+            diff = np.where(active_mask, diff, np.nan)
         absmax = np.percentile(np.abs(diff), 99)
         im = axes[0, ncols-1].imshow(diff, origin="lower", cmap="RdBu_r",
                                       vmin=-absmax, vmax=absmax, aspect="auto")
@@ -104,7 +112,8 @@ def plot_offsets(scope_name: str, r: dict, out_dir: Path) -> None:
     print(f"  → {p}")
 
 
-def plot_noise(scope_name: str, r: dict, out_dir: Path) -> None:
+def plot_noise(scope_name: str, r: dict, out_dir: Path,
+               active_mask: np.ndarray | None = None) -> None:
     """Noise map, histogram, CM-noise profile, and clipped-frames map."""
     noise     = r.get("noise")
     cm_noise  = r.get("cm_noise")
@@ -116,7 +125,12 @@ def plot_noise(scope_name: str, r: dict, out_dir: Path) -> None:
     fig, axes = plt.subplots(1, ncols, figsize=(5.5*ncols, 5))
     fig.suptitle(f"Electronic Noise — {scope_name}", fontsize=13, fontweight="bold")
 
-    im = axes[0].imshow(noise, origin="lower", cmap="inferno",
+    # Apply active_mask to noise for visualization
+    noise_disp = noise.copy()
+    if active_mask is not None:
+        noise_disp = np.where(active_mask, noise_disp, np.nan)
+    
+    im = axes[0].imshow(noise_disp, origin="lower", cmap="inferno",
                          vmin=0, vmax=float(np.percentile(noise, 99)), aspect="auto")
     axes[0].set_title("Per-Pixel Noise (RMS)")
     axes[0].set_xlabel("X [detector column]"); axes[0].set_ylabel("Y [detector row]")
@@ -137,7 +151,10 @@ def plot_noise(scope_name: str, r: dict, out_dir: Path) -> None:
 
     if n_clipped is not None:
         n_max = int(n_clipped.max()) or 1
-        im2 = axes[3].imshow(n_clipped, origin="lower", cmap="hot_r",
+        n_clipped_disp = n_clipped.copy()
+        if active_mask is not None:
+            n_clipped_disp = np.where(active_mask, n_clipped_disp, np.nan)
+        im2 = axes[3].imshow(n_clipped_disp, origin="lower", cmap="hot_r",
                               vmin=0, vmax=n_max, aspect="auto")
         axes[3].set_title("Frames Clipped / Pixel")
         axes[3].set_xlabel("X [detector column]"); axes[3].set_ylabel("Y [detector row]")

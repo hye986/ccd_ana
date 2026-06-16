@@ -26,7 +26,8 @@ from ..lib    import (compute_offset_median,
                        resolve_asics, split_asics,
                        ASIC_SLICES, ASIC_MASK, ASIC_WIDTH,
                        build_bad_pixel_mask,
-                       configure_asics, get_active_mask)
+                       configure_asics, get_active_mask,
+                       _get_masked_names)
 from ..utils  import (save_calibration_h5, save_calibration_npy,
                        plot_offsets, plot_noise, plot_cm_map, plot_bad_pixels)
 
@@ -103,8 +104,8 @@ def _analyse_scope(data:        np.ndarray,
 
     scope_dir = out_dir / label
     scope_dir.mkdir(parents=True, exist_ok=True)
-    plot_offsets(label, r, scope_dir)
-    plot_noise(label, r, scope_dir)
+    plot_offsets(label, r, scope_dir, active_mask=active_mask)
+    plot_noise(label, r, scope_dir, active_mask=active_mask)
     plot_cm_map(label, cm_map, scope_dir, asic_names=asic_names)
     
     if build_bp_mask and bad_pixel_mask is not None:
@@ -233,13 +234,15 @@ def run(cfg: Config) -> dict:
         print(f"  ASIC mask applied: excluding ASICs {asic_mask}")
     print(f"  ASIC configuration: {n_asics} ASICs × {ASIC_WIDTH} columns = {data_raw.shape[2]} total columns")
 
-    # Use per-ASIC CM correction
-    asic_slices = ASIC_SLICES if len(ASIC_SLICES) > 1 else None
+    # Use per-ASIC CM correction, but filter out masked ASICs
+    masked_names = _get_masked_names()
+    active_asic_slices = {k: v for k, v in ASIC_SLICES.items() if k not in masked_names}
+    asic_slices = active_asic_slices if len(active_asic_slices) > 1 else None
 
     # ── Full-frame analysis ───────────────────────────────────────────────────
     all_results: dict = {"asics": {}}
     
-    # Create active mask for bad pixel detection
+    # Create active mask for bad pixel detection and plotting
     active_mask = get_active_mask(data_raw.shape[1], data_raw.shape[2], n_asics, asic_mask)
     
     all_results["global"] = _analyse_scope(

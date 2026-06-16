@@ -7,7 +7,8 @@ from .geometry            import (ASIC_SLICES, ASIC_LABEL,
                                    get_frame_bounds,
                                    ADC_MAX, ADC_RANGE,
                                    DETECTOR_HEIGHT, DETECTOR_WIDTH,
-                                   ASIC_WIDTH, ASIC_NAMES, ASIC_MASK)
+                                   ASIC_WIDTH, ASIC_NAMES, ASIC_MASK,
+                                   _get_masked_names)
 from .pedestal            import (compute_offset_median,
                                    compute_offset_sigma_clip)
 from .common_mode         import (cm_correct_frame,
