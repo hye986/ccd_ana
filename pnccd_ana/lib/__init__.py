@@ -2,10 +2,12 @@
 from .geometry            import (ASIC_SLICES, ASIC_LABEL,
                                    ASIC_COLORS, ASIC_GRID_POS,
                                    resolve_asics, split_asics,
-                                   _update_asic_slices, get_frame_bounds,
+                                   configure_asics, get_asic_slice,
+                                   get_active_mask,
+                                   get_frame_bounds,
                                    ADC_MAX, ADC_RANGE,
                                    DETECTOR_HEIGHT, DETECTOR_WIDTH,
-                                   N_ASICS, ASIC_WIDTH, ASIC_NAMES)
+                                   ASIC_WIDTH, ASIC_NAMES, ASIC_MASK)
 from .pedestal            import (compute_offset_median,
                                    compute_offset_sigma_clip)
 from .common_mode         import (cm_correct_frame,

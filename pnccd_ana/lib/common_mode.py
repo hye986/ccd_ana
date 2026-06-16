@@ -7,11 +7,11 @@ Rolling shutter: sensor reads rows from bottom to top.
 A detector "row" is a horizontal line of pixels (constant Y, all X) that are
 read out simultaneously. 
 
-For multi-ASIC detectors (8 ASICs × 64 columns = 512 total), CM is computed
-per ASIC to avoid cross-ASIC interference in the correction.
+For multi-ASIC detectors, CM is computed per ASIC to avoid cross-ASIC 
+interference in the correction.
 
 Array layout: data[frame, Y, X]
-CM is computed per ASIC: median over 64 X pixels for each Y row.
+CM is computed per ASIC: median over ASIC_WIDTH X pixels for each Y row.
 Resulting cm_map shape: (n_frames, n_Y, n_asics)
 """
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .geometry import ASIC_WIDTH, N_ASICS
+from .geometry import ASIC_WIDTH
 
 
 def cm_correct_frame_per_asic(
@@ -99,7 +99,7 @@ def apply_common_mode_correction(
     ----------
     data        : float32 (n_frames, n_Y, n_X) — raw frames
     offset      : float32 (n_Y, n_X)           — pedestal map
-    asic_slices : optional ASIC geometry
+    asic_slices : optional ASIC geometry (only non-masked ASICs should be passed)
 
     Returns
     -------
@@ -112,7 +112,7 @@ def apply_common_mode_correction(
     residual = (data - offset[np.newaxis]).astype(np.float32)
     
     if asic_slices:
-        # Per-ASIC CM correction
+        # Per-ASIC CM correction (masked ASICs already excluded from asic_slices)
         asic_names = sorted(asic_slices.keys())
         n_asics = len(asic_names)
         cm_map = np.zeros((data.shape[0], data.shape[1], n_asics), dtype=np.float32)

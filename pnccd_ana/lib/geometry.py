@@ -50,6 +50,8 @@ Supported sizes
 
 from __future__ import annotations
 
+import numpy as np
+
 ADC_MAX   = 65535   # 2^16 - 1
 ADC_RANGE = 65536   # 2^16
 
@@ -57,54 +59,86 @@ ADC_RANGE = 65536   # 2^16
 DETECTOR_HEIGHT = 512   # Y axis  (axis 0 in 2-D array)
 DETECTOR_WIDTH  = 512   # X axis  (axis 1 in 2-D array)
 
-# ASIC configuration
-N_ASICS = 8                    # number of ASICs horizontally
-ASIC_WIDTH = 64                # columns per ASIC
-ASIC_NAMES = [f"H{i}" for i in range(N_ASICS)]
+# ASIC configuration (updated at runtime via configure_asics)
+_N_ASICS = 8                    # default number of ASICs horizontally
+ASIC_WIDTH = 64                 # columns per ASIC (computed from width / N_ASICS)
+ASIC_NAMES: list[str] = []     # populated by configure_asics()
 
-# ASIC metadata
-ASIC_LABEL = {f"H{i}": f"ASIC {i}" for i in range(N_ASICS)}
-ASIC_COLORS = {
-    "H0": "#1f77b4", "H1": "#ff7f0e", "H2": "#2ca02c", "H3": "#d62728",
-    "H4": "#9467bd", "H5": "#8c564b", "H6": "#e377c2", "H7": "#7f7f7f",
-}
-ASIC_GRID_POS = {f"H{i}": (0, i) for i in range(N_ASICS)}
+# ASIC metadata (populated by configure_asics)
+ASIC_LABEL: dict[str, str] = {}
+ASIC_COLORS: dict[str, str] = {}
+ASIC_GRID_POS: dict[str, tuple[int, int]] = {}
 
 # ASIC slices (Y0, Y1, X0, X1) — updated at runtime
-# For 512x512 with 8 ASICs: each ASIC handles 64 columns
 ASIC_SLICES: dict[str, tuple[int, int, int, int]] = {}
 
-# Legacy single-hybrid support
-ALL_ASICS_LEGACY = ["H0"]
-ASIC_LABEL_LEGACY = {"H0": "single-hybrid"}
-ASIC_COLORS_LEGACY = {"H0": "#4e9a9a"}
-ASIC_GRID_POS_LEGACY = {"H0": (0, 0)}
+# ASIC mask: indices of ASICs to exclude from analysis
+ASIC_MASK: set[int] = set()
+
+# Default ASIC colors (8 colors for up to 8 ASICs)
+_DEFAULT_COLORS = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+    "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+]
 
 
-def _update_asic_slices(height: int, width: int) -> None:
+def configure_asics(n_asics: int, width: int, mask: list[int] | None = None) -> None:
     """
-    Update ASIC_SLICES to match frame dimensions.
+    Configure ASIC geometry based on detector dimensions.
     
-    For 512 columns with 8 ASICs: 512 / 8 = 64 cols per ASIC
+    Parameters
+    ----------
+    n_asics : int — number of ASICs horizontally
+    width   : int — total number of columns
+    mask    : list of ASIC indices to exclude from analysis
     """
-    global ASIC_SLICES
+    global _N_ASICS, ASIC_WIDTH, ASIC_NAMES
+    global ASIC_LABEL, ASIC_COLORS, ASIC_GRID_POS
+    global ASIC_SLICES, ASIC_MASK
+    
+    _N_ASICS = n_asics
+    ASIC_WIDTH = width // n_asics
+    ASIC_NAMES = [f"H{i}" for i in range(n_asics)]
+    ASIC_MASK = set(mask) if mask else set()
+    
+    # Populate metadata
+    ASIC_LABEL.clear()
+    ASIC_COLORS.clear()
+    ASIC_GRID_POS.clear()
     ASIC_SLICES.clear()
     
-    if width == 512 and N_ASICS == 8:
-        # Standard 8-ASIC configuration
-        for i in range(N_ASICS):
-            ASIC_SLICES[f"H{i}"] = (0, height - 1, i * ASIC_WIDTH, (i + 1) * ASIC_WIDTH - 1)
-    else:
-        # Fallback: treat as single ASIC
-        ASIC_SLICES["H0"] = (0, height - 1, 0, width - 1)
+    for i in range(n_asics):
+        name = f"H{i}"
+        ASIC_LABEL[name] = f"ASIC {i}" + (" (masked)" if i in ASIC_MASK else "")
+        ASIC_COLORS[name] = _DEFAULT_COLORS[i % len(_DEFAULT_COLORS)]
+        ASIC_GRID_POS[name] = (0, i)
+        ASIC_SLICES[name] = (0, DETECTOR_HEIGHT - 1, i * ASIC_WIDTH, (i + 1) * ASIC_WIDTH - 1)
 
 
-def get_asic_slice(asic_name: str) -> tuple[int, slice]:
+def get_asic_slice(asic_name: str) -> tuple[slice, slice]:
     """Get (Y_slice, X_slice) for an ASIC."""
-    if asic_name not in ASIC_SLICES:
-        _update_asic_slices(DETECTOR_HEIGHT, DETECTOR_WIDTH)
+    if not ASIC_SLICES:
+        configure_asics(_N_ASICS, DETECTOR_WIDTH)
     y0, y1, x0, x1 = ASIC_SLICES[asic_name]
     return (slice(y0, y1 + 1), slice(x0, x1 + 1))
+
+
+def get_active_mask(height: int, width: int, n_asics: int, mask: list[int] | None = None) -> np.ndarray:
+    """
+    Create a boolean mask for active (non-masked) pixels.
+    
+    Returns a (height, width) boolean array where True = active pixel.
+    """
+    mask_set = set(mask) if mask else set()
+    
+    active = np.ones((height, width), dtype=bool)
+    for i in range(n_asics):
+        if i in mask_set:
+            x0 = i * ASIC_WIDTH
+            x1 = (i + 1) * ASIC_WIDTH
+            active[:, x0:x1] = False
+    
+    return active
 
 
 def get_frame_bounds(height: int, width: int) -> tuple[int, int, int, int]:
@@ -112,21 +146,22 @@ def get_frame_bounds(height: int, width: int) -> tuple[int, int, int, int]:
     return (0, height - 1, 0, width - 1)
 
 
-def resolve_asics(asics: list[str] | None, width: int = 512) -> list[str] | None:
+def resolve_asics(asics: list[str] | None, n_asics: int | None = None) -> list[str] | None:
     """
     Normalise a user-supplied ASIC list.
 
     Parameters
     ----------
-    asics : None / [] -> return full list of ASIC names for the detector
-            list of ASIC names -> validate and return
-            "single" -> return legacy single-hybrid ["H0"]
+    asics   : None / [] -> return all non-masked ASIC names
+              list of ASIC names -> validate and return
+              "single" -> return legacy single-hybrid ["H0"]
+    n_asics : number of ASICs (for fallback)
 
     Returns None (full-frame mode) or list of ASIC names.
     """
     if asics is None or asics == []:
-        # Default: return all ASICs for the detector width
-        return [f"H{i}" for i in range(N_ASICS)]
+        # Return all non-masked ASICs
+        return [f"H{i}" for i in range(n_asics or _N_ASICS) if i not in ASIC_MASK]
     
     if isinstance(asics, str):
         if asics.lower() in ("single", "single_hybrid", "legacy"):
@@ -135,12 +170,18 @@ def resolve_asics(asics: list[str] | None, width: int = 512) -> list[str] | None
     
     result = [a.upper() for a in asics]
     
-    # Validate ASIC names exist
-    valid_asics = [a for a in result if a in ASIC_SLICES]
+    # Filter out masked ASICs
+    valid_asics = [a for a in result if a in ASIC_SLICES and a not in _get_masked_names()]
     if not valid_asics:
-        return [f"H{i}" for i in range(N_ASICS)]
+        n = n_asics or _N_ASICS
+        return [f"H{i}" for i in range(n) if i not in ASIC_MASK]
     
     return valid_asics
+
+
+def _get_masked_names() -> set[str]:
+    """Get set of masked ASIC names."""
+    return {f"H{i}" for i in ASIC_MASK}
 
 
 def split_asics(data, asic_names: list[str]) -> dict[str, object]:
@@ -159,9 +200,9 @@ def split_asics(data, asic_names: list[str]) -> dict[str, object]:
     # Ensure ASIC_SLICES is initialized
     if not ASIC_SLICES:
         if data.ndim == 3:
-            _update_asic_slices(data.shape[1], data.shape[2])
+            configure_asics(_N_ASICS, data.shape[2])
         else:
-            _update_asic_slices(data.shape[0], data.shape[1])
+            configure_asics(_N_ASICS, data.shape[1])
     
     for name in asic_names:
         if name not in ASIC_SLICES:

@@ -85,6 +85,9 @@ _DEFAULTS: dict[str, Any] = {
         "max_frames":       None,          # null = all
         "complete_only":    True,          # skip incomplete last frame
         "save_frame_plots": True,          # generate diagnostic plots
+        # ASIC configuration
+        "ASIC_num":         8,             # number of ASICs horizontally (512 cols / ASIC_num = cols per ASIC)
+        "ASIC_mask":        [],             # list of masked ASIC indices to exclude (e.g., [0, 2] to skip ASICs 0 and 2)
         "metadata":         {},
     },
     "dark_frames": {
@@ -285,6 +288,9 @@ general:
   max_frames: null                  # null = all frames
   complete_only: true               # skip incomplete last frame
   save_frame_plots: true            # generate diagnostic plots (hitmap, spectrum, etc.)
+  # ASIC configuration
+  ASIC_num: 8                       # number of ASICs horizontally (frame_cols / ASIC_num = cols per ASIC)
+  ASIC_mask: []                     # list of masked ASIC indices to exclude (e.g., [0, 2] to skip ASICs 0 and 2)
   metadata:
     operator: ""
     sample: ""
