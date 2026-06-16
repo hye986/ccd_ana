@@ -20,8 +20,7 @@ from ..lib    import (find_events,
                        N_GRADES, EVENT_DTYPE,
                        build_bad_pixel_mask,
                        ASIC_SLICES, ASIC_WIDTH,
-                       configure_asics, get_active_mask,
-                       _get_masked_names)
+                       configure_asics, get_active_mask)
 from ..lib.common_mode import cm_correct_frame
 from ..utils  import (load_calibration_h5, load_calibration_npy,
                        save_events_h5,
@@ -269,13 +268,12 @@ def run(cfg: Config) -> dict:
     asic_mask = gen.get("ASIC_mask", [])
     configure_asics(n_asics, W, mask=asic_mask)
     
-    # Build per-ASIC CM slices (exclude masked ASICs)
-    masked_names = _get_masked_names()
-    active_asic_slices = {k: v for k, v in ASIC_SLICES.items() if k not in masked_names}
-    asic_slices = active_asic_slices if len(active_asic_slices) > 1 else None
+    # Per-ASIC CM slices - include ALL ASICs for CM correction (even masked ones)
+    # CM is computed per ASIC using 64 columns each
+    asic_slices = ASIC_SLICES if len(ASIC_SLICES) > 1 else None
 
     # ── Build search mask (respects ASIC mask) ──────────────────────────────
-    # Create active mask that excludes masked ASICs
+    # Create active mask that excludes masked ASICs from event search
     active_mask = get_active_mask(H, W, n_asics, asic_mask)
     search_mask: np.ndarray | None = active_mask
 

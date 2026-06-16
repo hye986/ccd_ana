@@ -25,8 +25,7 @@ from ..lib    import (compute_offset_median,
                        compute_cm_noise,
                        ASIC_SLICES, ASIC_MASK, ASIC_WIDTH,
                        build_bad_pixel_mask,
-                       configure_asics, get_active_mask,
-                       _get_masked_names)
+                       configure_asics, get_active_mask)
 from ..utils  import (save_calibration_h5, save_calibration_npy,
                        plot_offsets, plot_noise, plot_cm_map, plot_bad_pixels)
 
@@ -232,10 +231,9 @@ def run(cfg: Config) -> dict:
         print(f"  ASIC mask applied: excluding ASICs {asic_mask}")
     print(f"  ASIC configuration: {n_asics} ASICs × {ASIC_WIDTH} columns = {data_raw.shape[2]} total columns")
 
-    # Use per-ASIC CM correction, but filter out masked ASICs
-    masked_names = _get_masked_names()
-    active_asic_slices = {k: v for k, v in ASIC_SLICES.items() if k not in masked_names}
-    asic_slices = active_asic_slices if len(active_asic_slices) > 1 else None
+    # Per-ASIC CM correction - include ALL ASICs (even masked ones)
+    # CM is computed per ASIC using 64 columns each
+    asic_slices = ASIC_SLICES if len(ASIC_SLICES) > 1 else None
 
     # ── Full-frame analysis (with per-ASIC CM correction) ─────────────────────
     all_results: dict = {}
