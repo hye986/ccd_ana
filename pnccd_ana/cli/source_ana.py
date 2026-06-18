@@ -320,7 +320,8 @@ def run(cfg: Config) -> dict:
                           asic_slices=asic_slices)
 
     all_results: list[np.ndarray] = []
-    remaining = gen["max_frames"]   # None = unlimited; decremented per file
+    remaining = gen["max_frames"]
+    total_frames_processed = 0
 
     for fpath in run_files:
         if remaining is not None and remaining <= 0:
@@ -341,6 +342,8 @@ def run(cfg: Config) -> dict:
         all_results.extend(file_results)
         if remaining is not None:
             remaining -= len(indices)
+        total_frames_processed += len(indices)
+
 
     results = all_results
 
@@ -436,7 +439,7 @@ def run(cfg: Config) -> dict:
                       "source_file":    str(source_run_path),
                       "calibration":    str(calibration_path),
                       "threshold_sigma": seed_sigma,
-                      "n_frames":       int(len(indices))},
+                      "n_frames":       int(total_frames_processed)},
         )
 
     # Also save maps as .npy for quick access

@@ -354,27 +354,41 @@ def detect_raw_geometry(
     # Check cache first
     cached = _load_metadata(path, height=height, width=width)
     if cached is not None:
-        # Validate cache by recalculating n_records from actual file size
-        file_size = path.stat().st_size
+        file_size  = path.stat().st_size
         header_size = cached.get("frame0_offset", _HEADER_SIZE)
         record_size = cached["record_size"]
-        
-        # Calculate actual n_records from file size
-        data_bytes = file_size - header_size
-        n_records_from_file = data_bytes // record_size
-        n_frames_from_file = n_records_from_file // cached["geometry"]["height"]
-        
-        # Reconstruct geometry dict with validated values
-        # Include cached frame record offsets if available
+        H           = cached["geometry"]["height"]
+        W           = cached["geometry"]["width"]
+
+        # Recalculate from file size to catch files that grew (ongoing
+        # acquisition) or shrank (truncation) since the cache was written.
+        data_bytes        = file_size - header_size
+        n_records_actual  = data_bytes // record_size
+        n_frames_actual   = n_records_actual // H
+        n_orphan          = n_records_actual % H
+
+        # Use cached n_frames only when file size is unchanged (fast path).
+        # If the file grew or shrank, trust the recalculated value and warn.
+        cached_n_frames = cached["geometry"]["n_frames"]
+        if n_frames_actual != cached_n_frames:
+            print(f"  NOTE: cached n_frames={cached_n_frames} differs from "
+                  f"recalculated n_frames={n_frames_actual} "
+                  f"(file size changed). Using recalculated value.")
+
+        if n_orphan != 0:
+            print(f"  WARNING: {n_orphan} orphaned rows after {n_frames_actual} "
+                  f"complete frames. Last partial frame ignored.")
+
         return {
-            "height":      cached["geometry"]["height"],
-            "width":       cached["geometry"]["width"],
-            "n_frames":    n_frames_from_file,
+            "height":      H,
+            "width":       W,
+            "n_frames":    n_frames_actual,       # always from file size
             "record_size": record_size,
-            "n_records":   n_records_from_file,
-            "dtype":       _record_dtype(cached["geometry"]["width"]),
+            "n_records":   n_records_actual,
+            "dtype":       _record_dtype(W),
             "_frame_record_offsets": cached.get("_frame_record_offsets"),
         }
+
     
     # Detect from file
     with open(path, "rb") as fh:
@@ -465,16 +479,29 @@ class _RawStore:
         H  = self.height
         n  = len(indices)
         out = np.empty((n, H, W), dtype=np.float32)
-        
-        for i, fi in enumerate(indices):
-            # Use pre-computed offset to find frame start
-            rec_start = int(self._frame_offsets[fi])
-            # Read H consecutive rows as a contiguous block and extract pixels
-            frame_rows = self._recs[rec_start:rec_start + H]["pix"]
-            out[i] = np.ascontiguousarray(frame_rows, dtype=np.float32)
-        
-        return out
 
+        # Validate indices before any IO
+        bad = indices >= self.n
+        if bad.any():
+            raise IndexError(
+                f"Frame indices out of range: requested max={int(indices.max())}, "
+                f"file contains {self.n} complete frames. "
+                f"File may be truncated.")
+
+        for i, fi in enumerate(indices):
+            rec_start = int(self._frame_offsets[fi])
+            # Check we won't read past end of memmap (truncated file guard)
+            rec_end = rec_start + H
+            if rec_end > len(self._recs):
+                raise IOError(
+                    f"Frame {fi}: records [{rec_start}:{rec_end}] exceed "
+                    f"memmap size {len(self._recs)}. "
+                    f"File is truncated — expected {H} rows but only "
+                    f"{len(self._recs) - rec_start} available.")
+            frame_rows = self._recs[rec_start:rec_end]["pix"]
+            out[i] = np.ascontiguousarray(frame_rows, dtype=np.float32)
+
+        return out
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Frame index discovery  (mirrors io_h5.get_frame_indices)

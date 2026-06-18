@@ -198,6 +198,7 @@ def process_frames_mt(
 # Calibration HDF5 save / load
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def _write_cal_group(grp: h5py.Group, r: dict) -> None:
     """Write calibration arrays into an open HDF5 group."""
     og = grp.require_group("offset")
@@ -206,11 +207,22 @@ def _write_cal_group(grp: h5py.Group, r: dict) -> None:
         ("offset_median",  "median",              og),
         ("offset_sigclip", "sigmaclip",           og),
         ("noise",          "pixel_rms",           ng),
-        ("cm_noise",       "cm_rms",              ng),
         ("n_clipped_map",  "n_clipped_per_pixel", ng),
     ]:
         if key in r:
             parent.create_dataset(dset_name, data=r[key], compression="gzip")
+
+    # CM noise: either a 1-D array (legacy) or a dict of per-ASIC arrays
+    if "cm_noise" in r:
+        cm = r["cm_noise"]
+        if isinstance(cm, dict):
+            # Per-ASIC: save each ASIC as noise/cm_rms_<NAME>
+            for asic_name, arr in cm.items():
+                ng.create_dataset(f"cm_rms_{asic_name}", data=arr,
+                                  compression="gzip")
+        else:
+            # Legacy 1-D array
+            ng.create_dataset("cm_rms", data=cm, compression="gzip")
 
 
 def save_calibration_h5(
@@ -346,11 +358,21 @@ def load_calibration_h5(
             d["noise"] = ng["pixel_rms"][:].astype(np.float32)
 
             # Optional extras
-            for key, h5path in [("cm_noise",      "noise/cm_rms"),
-                                 ("n_clipped_map", "noise/n_clipped_per_pixel")]:
-                dset = grp.get(h5path)
-                if dset is not None:
-                    d[key] = dset[:].astype(np.float32)
+            # n_clipped_map: single dataset
+            dset = grp.get("noise/n_clipped_per_pixel")
+            if dset is not None:
+                d["n_clipped_map"] = dset[:].astype(np.float32)
+
+            # CM noise: may be legacy 1-D array or per-ASIC datasets
+            ng = grp.get("noise")
+            if ng is not None:
+                # Check for per-ASIC cm_rms_<NAME> datasets first
+                asic_cm = {k[7:]: ng[k][:].astype(np.float32)
+                           for k in ng.keys() if k.startswith("cm_rms_")}
+                if asic_cm:
+                    d["cm_noise"] = asic_cm          # dict of per-ASIC arrays
+                elif "cm_rms" in ng:
+                    d["cm_noise"] = ng["cm_rms"][:].astype(np.float32)  # legacy
 
             return d
 

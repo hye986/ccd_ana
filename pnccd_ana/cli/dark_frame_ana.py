@@ -77,13 +77,9 @@ def _analyse_scope(data:        np.ndarray,
         data, ref_offset, label, asic_slices=asic_slices)
     r["noise"]          = compute_noise(corrected, keep_mask, label)
     
-    # Handle both dict and array cm_noise
-    cm_noise = compute_cm_noise(cm_map, label, asic_names=asic_names)
-    if isinstance(cm_noise, dict):
-        r["cm_noise"] = cm_noise.get(list(cm_noise.keys())[0] if cm_noise else "global")
-    else:
-        r["cm_noise"] = cm_noise
-    
+    # Store full per-ASIC dict or 1-D array — both handled by save_calibration_h5
+    r["cm_noise"] = compute_cm_noise(cm_map, label, asic_names=asic_names)
+
     r["cm_map"]         = cm_map
     r["asic_names"]     = asic_names
     r["data_corrected"] = corrected
