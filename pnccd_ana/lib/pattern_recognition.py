@@ -87,6 +87,9 @@ _OFFSET_TO_BIT: dict[tuple[int,int], int] = {
     (-1,+1): 7,   # down-right
 }
 
+_GRADE_DEFS_BY_ID: dict[int, tuple[str, frozenset]] = {
+    gid: (label, offsets) for gid, label, offsets in _GRADE_DEFS
+
 _GRADE_DEFS: list[tuple[int, str, frozenset]] = [
     # ── grade  label       neighbour offsets (dY, dX), centre excluded ──
     (  0, "single",    frozenset()),
@@ -497,7 +500,7 @@ def find_events(
         if grade == 0 or grade == GRADE_OTHER:
             sig = cv
         else:
-            _, _, offsets = _GRADE_DEFS[grade]
+            _, _, offsets = _GRADE_DEFS_BY_ID[grade]
             sig = cv + sum(float(frame[cy+dY, cx+dX]) for dY, dX in offsets)
 
         rows_l.append(int(cy));   cols_l.append(int(cx))

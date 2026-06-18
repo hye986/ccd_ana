@@ -227,7 +227,7 @@ def run(cfg: Config) -> dict:
     # Configure ASIC geometry from config
     n_asics = int(gen.get("ASIC_num", 8))
     asic_mask = gen.get("ASIC_mask", [])
-    configure_asics(n_asics, data_raw.shape[2], mask=asic_mask)
+    configure_asics(n_asics, data_raw.shape[2], data_raw.shape[1], mask=asic_mask)
     
     if asic_mask:
         print(f"  ASIC mask applied: excluding ASICs {asic_mask}")

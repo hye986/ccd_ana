@@ -268,7 +268,7 @@ def run(cfg: Config) -> dict:
     # ── Configure ASIC geometry ───────────────────────────────────────────────
     n_asics = int(gen.get("ASIC_num", 8))
     asic_mask = gen.get("ASIC_mask", [])
-    configure_asics(n_asics, W, mask=asic_mask)
+    configure_asics(n_asics, W, H, mask=asic_mask)
     
     # Per-ASIC CM slices - include ALL ASICs for CM correction (even masked ones)
     # CM is computed per ASIC using 64 columns each

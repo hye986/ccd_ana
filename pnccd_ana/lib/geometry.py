@@ -82,7 +82,7 @@ _DEFAULT_COLORS = [
 ]
 
 
-def configure_asics(n_asics: int, width: int, mask: list[int] | None = None) -> None:
+def configure_asics(n_asics: int, width: int, height: int,  mask: list[int] | None = None) -> None:
     """
     Configure ASIC geometry based on detector dimensions.
     
@@ -112,7 +112,7 @@ def configure_asics(n_asics: int, width: int, mask: list[int] | None = None) -> 
         ASIC_LABEL[name] = f"ASIC {i}" + (" (masked)" if i in ASIC_MASK else "")
         ASIC_COLORS[name] = _DEFAULT_COLORS[i % len(_DEFAULT_COLORS)]
         ASIC_GRID_POS[name] = (0, i)
-        ASIC_SLICES[name] = (0, DETECTOR_HEIGHT - 1, i * ASIC_WIDTH, (i + 1) * ASIC_WIDTH - 1)
+        ASIC_SLICES[name] = (0, height - 1, i * ASIC_WIDTH, (i + 1) * ASIC_WIDTH - 1)
 
 
 def get_asic_slice(asic_name: str) -> tuple[slice, slice]:

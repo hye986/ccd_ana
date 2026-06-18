@@ -43,13 +43,13 @@ def cm_correct_frame_per_asic(
     n_Y = residual.shape[0]
     n_asics = len(asic_slices)
     cm_values = np.zeros((n_Y, n_asics), dtype=np.float32)
-    corrected = residual.copy()
+    corrected = np.empty_like(residual)
     
     asic_names = sorted(asic_slices.keys())
     for i, name in enumerate(asic_names):
         _, _, x0, x1 = asic_slices[name]
         # CM = median over X for this ASIC's columns
-        asic_data = corrected[:, x0:x1+1]
+        asic_data = residual[:, x0:x1+1]
         cm_values[:, i] = np.median(asic_data, axis=1)
         # Subtract CM from this ASIC's columns
         corrected[:, x0:x1+1] = asic_data - cm_values[:, i:i+1]

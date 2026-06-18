@@ -289,7 +289,10 @@ def plot_bad_pixels(
         x0, x1 = i * asic_width, (i + 1) * asic_width
         asic_bad = bad_mask[:, x0:x1].sum()
         asic_total = x1 - x0
-        asic_active = (active_mask[:, x0:x1] if active_mask is not None else np.ones((Y, asic_width), dtype=bool))[:, x0:x1].sum()
+        if active_mask is not None:
+            asic_active = int(active_mask[:, x0:x1].sum())
+        else:
+            asic_active = Y * asic_width   # all pixels active
         asic_stats.append(asic_bad)
         asic_labels.append(f'ASIC{i}')
     

@@ -65,14 +65,14 @@ def correct_frame(
 
 def _load_offset(cal: dict, asics: list[str] | None) -> np.ndarray | None:
     """Load the offset map from the calibration dict (prefer sigclip > median)."""
-    for preference in ("sigmaclip", "median"):
-        key = f"offset/{preference}"
-        if asics:
-            for aname in asics:
-                if cal.get(aname, {}).get(key) is not None:
-                    return cal[aname][key].astype(np.float32)
-        if cal.get("global", {}).get(key) is not None:
-            return cal["global"][key].astype(np.float32)
+    # Try global first (single-hybrid primary path)
+    if "offset" in cal.get("global", {}):
+        return cal["global"]["offset"].astype(np.float32)
+    # Fall back to per-ASIC
+    if asics:
+        for aname in asics:
+            if "offset" in cal.get(aname, {}):
+                return cal[aname]["offset"].astype(np.float32)
     return None
 
 
