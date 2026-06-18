@@ -78,7 +78,6 @@ import numpy as np
 _HEADER_MAGIC  = b"16BU0000"
 _FRAME_MARKER  = 0xFFFF
 _LINE_MARKER   = 0xFFFE
-_ADC_EXPECTED  = 0            # ADC counter value written by the recorder
 _COMMON_HEIGHTS = (128, 256, 512, 1024, 2048, 4096)
 _HEADER_SIZE   = 8            # bytes in file header
 
@@ -238,11 +237,8 @@ def _try_geometry(path: str | Path, data_bytes: int,
     dtype = _record_dtype(w)
     recs  = np.memmap(path, dtype=dtype, mode="r", offset=8, shape=(n_records,))
     markers = np.asarray(recs["marker"])
-    adcs    = np.asarray(recs["adc"])
 
     if not np.all((markers == _FRAME_MARKER) | (markers == _LINE_MARKER)):
-        return None
-    if not np.all(adcs == _ADC_EXPECTED):
         return None
 
     frame_starts = np.flatnonzero(markers == _FRAME_MARKER)

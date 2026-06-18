@@ -198,7 +198,8 @@ def run(cfg: Config) -> dict:
         return raw   # pass raw frames through unchanged
 
     all_chunks: list[np.ndarray] = []
-    remaining = gen["max_frames"]   # None = unlimited; decremented per file
+    remaining = gen["max_frames"]
+    total_frames_loaded = 0
 
     for fpath in run_files:
         if remaining is not None and remaining <= 0:
@@ -216,6 +217,7 @@ def run(cfg: Config) -> dict:
         all_chunks.extend(chunks)
         if remaining is not None:
             remaining -= len(indices)
+        total_frames_loaded += len(indices)
 
     data_raw = np.concatenate(all_chunks, axis=0)
     print(f"\n  Total loaded: {data_raw.shape[0]} frames  "
@@ -257,7 +259,7 @@ def run(cfg: Config) -> dict:
             out_dir / "dark_calibration.h5",
             save_payload,
             n_sigma=n_sigma,
-            n_frames=len(indices),
+            n_frames=total_frames_loaded,
             methods=methods,
             metadata=gen.get("metadata", {}),
         )

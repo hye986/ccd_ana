@@ -47,6 +47,7 @@ def _load_cal(cal_source: str,
 
 
 def _build_noise_map(cal: dict,
+                     asics: list[str] | None = None,
                      noise_scope: str = "auto") -> np.ndarray:
     """
     Assemble a full noise map from calibration for single-hybrid.
@@ -119,6 +120,7 @@ def _build_bad_pixel_mask(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _make_worker(cal: dict,
+                 asics: list[str] | None,
                  noise_map: np.ndarray,
                  seed_sigma: float,
                  split_sigma: float,

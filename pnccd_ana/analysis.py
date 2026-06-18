@@ -261,7 +261,7 @@ def build_noise_map(cal:         dict,
     noise_map : float32 (1024, 1024) — per-pixel electronic noise [ADU RMS]
     """
     from .cli.source_ana import _build_noise_map
-    return _build_noise_map(cal, asics, noise_scope=noise_scope)
+    return _build_noise_map(cal, asics=asics, noise_scope=noise_scope)
 
 
 def load_raw_h5(path:       str | Path,
