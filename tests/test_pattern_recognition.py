@@ -69,10 +69,11 @@ def test_outer_5x5_pixel_does_not_change_central_3x3_grade() -> None:
         _check_one_event(_events(frame, use_c=use_c), 1, 1300.0)
 
 
-def test_unknown_central_3x3_pattern_is_grade_13() -> None:
+def test_unknown_central_3x3_pattern_is_grade_other() -> None:
     frame = _frame_for_offsets(((0, +1), (0, -1)))
+    from pnccd_ana.lib.pattern_recognition import GRADE_OTHER
     for use_c in (False, True):
-        _check_one_event(_events(frame, use_c=use_c), 13, 1000.0)
+        _check_one_event(_events(frame, use_c=use_c), GRADE_OTHER, 1000.0)
 
 
 # ── Tie-breaker regression tests ──────────────────────────────────────────────
