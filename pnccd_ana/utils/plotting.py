@@ -33,10 +33,13 @@ def _cb(ax, im, label="ADU"):
 
 
 def _stats_box(ax, arr, fmt=".2f"):
-    flat = arr.ravel()
-    txt  = (f"μ={float(flat.mean()):{fmt}}\n"
-            f"σ={float(flat.std()):{fmt}}\n"
-            f"med={float(np.median(flat)):{fmt}}")
+    if isinstance(arr, dict):
+        vals = np.concatenate(list(arr.values()))
+    else:
+        vals = arr.ravel()
+    txt  = (f"μ={float(vals.mean()):{fmt}}\n"
+            f"σ={float(vals.std()):{fmt}}\n"
+            f"med={float(np.median(vals)):{fmt}}")
     ax.text(0.97, 0.97, txt, transform=ax.transAxes,
             ha="right", va="top", fontsize=7,
             bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.75))
@@ -147,7 +150,13 @@ def plot_noise(scope_name: str, r: dict, out_dir: Path,
     _stats_box(axes[1], flat)
 
     if cm_noise is not None:
-        axes[2].plot(np.arange(len(cm_noise)), cm_noise, color="teal", lw=0.9)
+        # cm_noise may be a dict {asic_name: array} for multi-ASIC, or a single array
+        if isinstance(cm_noise, dict):
+            for name, vals in cm_noise.items():
+                axes[2].plot(np.arange(len(vals)), vals, lw=0.9, label=name)
+            axes[2].legend(fontsize=7, ncol=2)
+        else:
+            axes[2].plot(np.arange(len(cm_noise)), cm_noise, color="teal", lw=0.9)
         axes[2].set_xlabel("Y [detector row]"); axes[2].set_ylabel("CM Noise (ADU RMS)")
         axes[2].set_title("CM Noise per Detector Row"); axes[2].grid(alpha=0.3)
         _stats_box(axes[2], cm_noise)
