@@ -312,7 +312,7 @@ def run(cfg: Config) -> dict:
     # Shared across all input files — worker appends to it as frames are processed.
     sample_buf: list = []
 
-    worker = _make_worker(cal, noise_map,
+    worker = _make_worker(cal, asics, noise_map,
                           seed_sigma, split_sigma, reject_extra,
                           search_mask,
                           bad_pixel_mask=bad_pixel_mask,

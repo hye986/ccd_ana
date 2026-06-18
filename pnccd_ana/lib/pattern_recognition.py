@@ -87,9 +87,6 @@ _OFFSET_TO_BIT: dict[tuple[int,int], int] = {
     (-1,+1): 7,   # down-right
 }
 
-_GRADE_DEFS_BY_ID: dict[int, tuple[str, frozenset]] = {
-    gid: (label, offsets) for gid, label, offsets in _GRADE_DEFS
-
 _GRADE_DEFS: list[tuple[int, str, frozenset]] = [
     # ── grade  label       neighbour offsets (dY, dX), centre excluded ──
     (  0, "single",    frozenset()),
@@ -109,12 +106,16 @@ _GRADE_DEFS: list[tuple[int, str, frozenset]] = [
     ( 11, "quadruple", frozenset({(-1, 0), ( 0,-1), (-1,-1)})),  # down+left+dl
     ( 12, "quadruple", frozenset({(-1, 0), ( 0,+1), (-1,+1)})),  # down+right+dr
     # ── Add new grades here.  Example (uncomment to enable):
-    # ( 14, "L-shape",  frozenset({(+1, 0), ( 0,+1), (+1,-1)})),
+    ( 13, "T-left",    frozenset({(+1, 0), ( 0,+1), (-1, 0)})),  # up+right+down
+    ( 14, "T-right",   frozenset({(+1, 0), ( 0,-1), (-1, 0)})),  # up+left+down
+    ( 15, "b-left",    frozenset({(+1, 0), ( 0,+1), (-1, 0), (-1,+1)})),  # up+right+down+dr
+    ( 16, "b-right",   frozenset({(+1, 0), ( 0,-1), (-1, 0), (-1,-1)})),  # up+left+down+dl
+    ( 17, "I-shape",   frozenset({(+1, 0), (-1, 0)})),  # up+left+down+dl
     # ─────────────────────────────────────────────────────────────────────────
 ]
 
 # grade 13 ("other") is the catch-all — never listed in _GRADE_DEFS
-GRADE_OTHER    = 13
+GRADE_OTHER    = 18
 GRADE_REJECTED = -1
 N_GRADES       = GRADE_OTHER + 1   # 14 named grades including "other"
 
@@ -124,6 +125,10 @@ GRADE_NAMES[GRADE_OTHER] = "other"
 
 _GRADE_LOOKUP: dict[frozenset, int] = {
     offsets: gid for gid, _, offsets in _GRADE_DEFS
+}
+
+_GRADE_DEFS_BY_ID: dict[int, tuple[str, frozenset]] = {
+    gid: (label, offsets) for gid, label, offsets in _GRADE_DEFS
 }
 
 
@@ -500,7 +505,7 @@ def find_events(
         if grade == 0 or grade == GRADE_OTHER:
             sig = cv
         else:
-            _, _, offsets = _GRADE_DEFS_BY_ID[grade]
+            _, offsets = _GRADE_DEFS_BY_ID[grade]
             sig = cv + sum(float(frame[cy+dY, cx+dX]) for dY, dX in offsets)
 
         rows_l.append(int(cy));   cols_l.append(int(cx))
