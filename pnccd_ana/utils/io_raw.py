@@ -296,8 +296,9 @@ def _detect_width_from_first_record(path: str | Path) -> int | None:
     """
     with open(path, "rb") as fh:
         fh.read(8)  # skip header
-        file_size = fh.seek(0, 2)  # get file size
-        fh.seek(8)  # back to start of data
+        fh.seek(0, 2)          # seek to end of file
+        file_size = fh.tell()  # read position = file size in bytes
+        fh.seek(8)             # back to start of data
         
         candidates = []
         for w in (256, 512, 768, 1024):

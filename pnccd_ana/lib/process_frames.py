@@ -29,18 +29,21 @@ from .geometry            import ASIC_SLICES
 
 
 def correct_frame(
-        raw:   np.ndarray,
-        cal:   dict,
-        asics: list[str] | None,
+        raw:         np.ndarray,
+        cal:         dict,
+        asics:       list[str] | None,
+        asic_slices: dict | None = None,
 ) -> np.ndarray:
     """
     Apply pedestal offset then common-mode correction to a single frame.
 
     Parameters
     ----------
-    raw   : float32 (Y, X)  — raw ADC values
-    cal   : calibration dict from load_calibration_h5()
-    asics : list of ASIC names, or None for global
+    raw         : float32 (Y, X)  — raw ADC values
+    cal         : calibration dict from load_calibration_h5()
+    asics       : list of ASIC names, or None for global
+    asic_slices : per-ASIC geometry dict (from geometry.ASIC_SLICES) for
+                  per-ASIC CM correction.  None → whole-row CM fallback.
 
     Returns
     -------
@@ -57,9 +60,10 @@ def correct_frame(
             # Sub-frame: clip offset to what fits
             frame = frame - off[:frame.shape[0], :frame.shape[1]]
 
-    # Common-mode correction: median over X for each Y row.
-    # Rolling shutter reads rows from bottom to top.
-    corrected, _ = cm_correct_frame(frame)
+    # Common-mode correction: per-ASIC when asic_slices provided,
+    # otherwise falls back to whole-row median CM.
+    # cm_correct_frame always returns a 3-tuple (corrected, cm, asic_names).
+    corrected, _, _ = cm_correct_frame(frame, asic_slices=asic_slices)
     return corrected
 
 
@@ -87,22 +91,29 @@ def make_worker(
         bad_pixel_mask:  np.ndarray | None = None,
         sample_buf:      list | None = None,
         sample_max:      int         = 0,
+        asic_slices:     dict | None = None,
 ) -> Any:
     """
     Build the per-chunk worker callable passed to process_frames_mt.
+
+    Parameters
+    ----------
+    asic_slices : per-ASIC geometry dict (from geometry.ASIC_SLICES) forwarded
+                  to correct_frame for per-ASIC CM correction.
+                  None -> whole-row CM fallback.
 
     Thread safety: only sample_buf.append() is GIL-locked.
     """
     _lock = threading.Lock() if sample_buf is not None else None
 
     def _worker(raw_chunk: np.ndarray, frame_indices: np.ndarray) -> np.ndarray:
-        # Embed sub-frame into 1024×1024 canvas when raw is not full-size
+        # Embed sub-frame into 1024x1024 canvas when raw is not full-size
         if asics and (raw_chunk.shape[1] != 1024 or raw_chunk.shape[2] != 1024):
             raw_chunk = _embed_into_full_frame(raw_chunk, asics)
 
         chunk_events: list[np.ndarray] = []
         for frame in raw_chunk:
-            corrected = correct_frame(frame, cal, asics)
+            corrected = correct_frame(frame, cal, asics, asic_slices=asic_slices)
 
             if sample_buf is not None:
                 with _lock:                             # type: ignore

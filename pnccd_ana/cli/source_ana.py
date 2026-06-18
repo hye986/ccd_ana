@@ -354,6 +354,7 @@ def run(cfg: Config) -> dict:
 
     # ── Diagnostic summary ────────────────────────────────────────────────────
     if len(events):
+        from ..lib.pattern_recognition import GRADE_OTHER as _GRADE_OTHER
         grade_counts = {int(g): int(n)
                         for g, n in zip(*np.unique(events["grade"], return_counts=True))}
         print(f"  Grade distribution: {grade_counts}")
@@ -364,30 +365,30 @@ def run(cfg: Config) -> dict:
               f"max={events['adu_seed'].max():.0f}  "
               f"median={np.median(events['adu_seed']):.0f}  ADU")
         # Check whether adu_sum and adu_seed are suspiciously identical.
-        # Grade 13 is deliberately centre-only, so diagnose that separately
-        # from a real failure to sum recognized split patterns.
+        # GRADE_OTHER events are deliberately centre-only, so diagnose that
+        # separately from a real failure to sum recognised split patterns.
         n_identical = int((np.abs(events["adu_sum"] - events["adu_seed"]) < 0.1).sum())
         frac_identical = n_identical / len(events) * 100
-        n_other = grade_counts.get(13, 0)
+        n_other = grade_counts.get(_GRADE_OTHER, 0)
         frac_other = n_other / len(events) * 100
-        split_mask = (events["grade"] > 0) & (events["grade"] < 13)
+        split_mask = (events["grade"] > 0) & (events["grade"] < _GRADE_OTHER)
         n_split = int(split_mask.sum())
         n_split_summed = int((np.abs(events["adu_sum"][split_mask] -
                                      events["adu_seed"][split_mask]) >= 0.1).sum())
         if frac_other > 50:
-            print(f"  ⚠  WARNING: {frac_other:.1f}% of events are grade 13 ('other')")
-            print("     Grade-13 events are unrecognized 5×5 patterns and store centre ADU only.")
+            print(f"  ⚠  WARNING: {frac_other:.1f}% of events are grade {_GRADE_OTHER} ('other')")
+            print("     'other' events are unrecognized 5x5 patterns and store centre ADU only.")
             print("     Use reject_extra: true for spectra, or raise split_sigma if random")
             print("     neighbour noise is creating extra above-split pixels.")
         elif n_split and n_split_summed < 0.8 * n_split:
             print(f"  ⚠  WARNING: only {n_split_summed}/{n_split} recognized split events "
                   "have adu_sum > adu_seed")
-            print("     This would indicate a summing bug for grades 1-12.")
+            print("     This would indicate a summing bug for grades 1 to (GRADE_OTHER-1).")
         elif frac_identical > 80 and grade_counts.get(0, 0) < len(events) * 0.8:
             print(f"  ⚠  WARNING: {frac_identical:.1f}% of events have adu_sum ≈ adu_seed")
             print("     Most accepted events are centre-only; inspect grade distribution.")
         elif n_split == 0:
-            print("  ✓  No recognized split events in grades 1-12")
+            print(f"  ✓  No recognized split events in grades 1–{_GRADE_OTHER - 1}")
         else:
             print(f"  ✓  {n_split_summed}/{n_split} recognized split events have "
                   "adu_sum > adu_seed")

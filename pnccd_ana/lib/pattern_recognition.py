@@ -114,10 +114,10 @@ _GRADE_DEFS: list[tuple[int, str, frozenset]] = [
     # ─────────────────────────────────────────────────────────────────────────
 ]
 
-# grade 13 ("other") is the catch-all — never listed in _GRADE_DEFS
+# grade 18 ("other") is the catch-all — never listed in _GRADE_DEFS
 GRADE_OTHER    = 18
 GRADE_REJECTED = -1
-N_GRADES       = GRADE_OTHER + 1   # 14 named grades including "other"
+N_GRADES       = GRADE_OTHER + 1   # 19 total grades: 0-17 named + 18 ("other")
 
 # Derived lookups — built once from _GRADE_DEFS
 GRADE_NAMES: dict[int, str] = {g: name for g, name, _ in _GRADE_DEFS}
@@ -148,7 +148,7 @@ def _offsets_to_bitmask(offsets: frozenset) -> int:
 def build_c_grade_table() -> list[int]:
     """
     Generate the 256-entry grade lookup table for the C extension.
-    Entry i = grade for neighbour bitmask i.  Default is GRADE_OTHER (13).
+    Entry i = grade for neighbour bitmask i.  Default is GRADE_OTHER (18).
     """
     table = [GRADE_OTHER] * 256
     for gid, _, offsets in _GRADE_DEFS:

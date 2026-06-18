@@ -82,62 +82,80 @@ _DEFAULT_COLORS = [
 ]
 
 
-def configure_asics(n_asics: int, width: int, height: int,  mask: list[int] | None = None) -> None:
+def configure_asics(n_asics: int, width: int, height: int, mask: list[int] | None = None) -> None:
     """
     Configure ASIC geometry based on detector dimensions.
-    
+
+    ASIC_SLICES stores (Y0, Y1, X0, X1) with **exclusive** upper bounds,
+    matching Python slice semantics: data[Y0:Y1, X0:X1].
+
     Parameters
     ----------
     n_asics : int — number of ASICs horizontally
     width   : int — total number of columns
+    height  : int — total number of rows
     mask    : list of ASIC indices to exclude from analysis
     """
     global _N_ASICS, ASIC_WIDTH, ASIC_NAMES
     global ASIC_LABEL, ASIC_COLORS, ASIC_GRID_POS
     global ASIC_SLICES, ASIC_MASK
-    
+
     _N_ASICS = n_asics
     ASIC_WIDTH = width // n_asics
     ASIC_NAMES = [f"C{i}" for i in range(n_asics)]
     ASIC_MASK = set(mask) if mask else set()
-    
+
     # Populate metadata
     ASIC_LABEL.clear()
     ASIC_COLORS.clear()
     ASIC_GRID_POS.clear()
     ASIC_SLICES.clear()
-    
+
     for i in range(n_asics):
         name = f"C{i}"
         ASIC_LABEL[name] = f"ASIC {i}" + (" (masked)" if i in ASIC_MASK else "")
         ASIC_COLORS[name] = _DEFAULT_COLORS[i % len(_DEFAULT_COLORS)]
         ASIC_GRID_POS[name] = (0, i)
-        ASIC_SLICES[name] = (0, height - 1, i * ASIC_WIDTH, (i + 1) * ASIC_WIDTH - 1)
+        # Exclusive upper bounds: Y in [0, height), X in [x0, x1)
+        ASIC_SLICES[name] = (0, height, i * ASIC_WIDTH, (i + 1) * ASIC_WIDTH)
 
 
 def get_asic_slice(asic_name: str) -> tuple[slice, slice]:
-    """Get (Y_slice, X_slice) for an ASIC."""
+    """Get (Y_slice, X_slice) for an ASIC.
+
+    Raises RuntimeError if configure_asics() has not been called yet, rather
+    than attempting a broken auto-initialisation (configure_asics requires
+    height which is not available here).
+    """
     if not ASIC_SLICES:
-        configure_asics(_N_ASICS, DETECTOR_WIDTH)
+        raise RuntimeError(
+            "ASIC geometry has not been initialised. "
+            "Call configure_asics(n_asics, width, height) before using get_asic_slice()."
+        )
     y0, y1, x0, x1 = ASIC_SLICES[asic_name]
-    return (slice(y0, y1 + 1), slice(x0, x1 + 1))
+    return (slice(y0, y1), slice(x0, x1))
 
 
 def get_active_mask(height: int, width: int, n_asics: int, mask: list[int] | None = None) -> np.ndarray:
     """
     Create a boolean mask for active (non-masked) pixels.
-    
+
+    Computes the per-ASIC column width locally from (width // n_asics) so
+    that the result is always consistent with the supplied dimensions,
+    regardless of whether configure_asics() has been called.
+
     Returns a (height, width) boolean array where True = active pixel.
     """
     mask_set = set(mask) if mask else set()
-    
+    asic_width = width // n_asics          # local — never reads the global ASIC_WIDTH
+
     active = np.ones((height, width), dtype=bool)
     for i in range(n_asics):
         if i in mask_set:
-            x0 = i * ASIC_WIDTH
-            x1 = (i + 1) * ASIC_WIDTH
+            x0 = i * asic_width
+            x1 = (i + 1) * asic_width
             active[:, x0:x1] = False
-    
+
     return active
 
 

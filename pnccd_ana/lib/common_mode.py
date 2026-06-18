@@ -48,11 +48,11 @@ def cm_correct_frame_per_asic(
     asic_names = sorted(asic_slices.keys())
     for i, name in enumerate(asic_names):
         _, _, x0, x1 = asic_slices[name]
-        # CM = median over X for this ASIC's columns
-        asic_data = residual[:, x0:x1+1]
+        # x0:x1 is already an exclusive slice (Python convention)
+        asic_data = residual[:, x0:x1]
         cm_values[:, i] = np.median(asic_data, axis=1)
         # Subtract CM from this ASIC's columns
-        corrected[:, x0:x1+1] = asic_data - cm_values[:, i:i+1]
+        corrected[:, x0:x1] = asic_data - cm_values[:, i:i+1]
     
     return corrected.astype(np.float32), cm_values, np.array(asic_names)
 
@@ -120,9 +120,9 @@ def apply_common_mode_correction(
         
         for i, name in enumerate(asic_names):
             _, _, x0, x1 = asic_slices[name]
-            # CM = median over X for this ASIC
-            cm_map[:, :, i] = np.median(residual[:, :, x0:x1+1], axis=2)
-            corrected[:, :, x0:x1+1] = residual[:, :, x0:x1+1] - cm_map[:, :, i:i+1]
+            # x0:x1 is already an exclusive slice (Python convention)
+            cm_map[:, :, i] = np.median(residual[:, :, x0:x1], axis=2)
+            corrected[:, :, x0:x1] = residual[:, :, x0:x1] - cm_map[:, :, i:i+1]
         
         return corrected, cm_map, asic_names
     else:
