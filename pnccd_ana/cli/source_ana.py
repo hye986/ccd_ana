@@ -402,8 +402,10 @@ def run(cfg: Config) -> dict:
 
     # ── Spectrum histograms ───────────────────────────────────────────────────
     bin_edges = np.linspace(sc["adu_min"], sc["adu_max"], sc["n_bins"] + 1)
+    from ..lib.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
     spectra: dict[int, np.ndarray] = {}
-    for g in range(N_GRADES):
+    all_grade_ids = [gid for gid, _, _ in _GRADE_DEFS] + [GRADE_OTHER]
+    for g in all_grade_ids:
         m = events["grade"] == g
         spectra[g], _ = (np.histogram(events["adu_sum"][m], bins=bin_edges)
                          if m.any() else

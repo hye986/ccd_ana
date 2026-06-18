@@ -382,20 +382,69 @@ def plot_cm_map(
 # Source analysis plots
 # ──────────────────────────────────────────────────────────────────────────────
 
-_GRADE_PALETTE = {
-    0: "#2176ae",
-    1: "#f7931e", 2: "#f7931e", 3: "#f7931e", 4: "#f7931e",
-    5: "#57cc99", 6: "#57cc99", 7: "#57cc99", 8: "#57cc99",
-    9: "#c77dff", 10: "#c77dff", 11: "#c77dff", 12: "#c77dff",
-    13: "#aaaaaa",
-}
-_GROUP_LABEL = {
-    0:  "single (G0)",
-    1:  "double (G1-4)",
-    5:  "triple (G5-8)",
-    9:  "quadruple (G9-12)",
-    13: "other (G13)",
-}
+def _build_grade_palette() -> dict[int, str]:
+    """
+    Build a grade→colour dict dynamically from _GRADE_DEFS.
+    Groups grades by label prefix so all 'double' grades share a colour etc.
+    Any grade beyond the known groups gets a grey shade.
+    """
+    from ..lib.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
+    # Colour per pattern type
+    _TYPE_COLOUR = {
+        "single":    "#2176ae",
+        "double":    "#f7931e",
+        "triple":    "#57cc99",
+        "quadruple": "#c77dff",
+    }
+    _GREY_SHADES = ["#aaaaaa", "#888888", "#666666", "#444444"]
+    palette: dict[int, str] = {}
+    grey_idx = 0
+    for gid, label, _ in _GRADE_DEFS:
+        # Match on the first word of the label
+        colour = next(
+            (c for key, c in _TYPE_COLOUR.items() if label.startswith(key)),
+            None,
+        )
+        if colour is None:
+            colour = _GREY_SHADES[grey_idx % len(_GREY_SHADES)]
+            grey_idx += 1
+        palette[gid] = colour
+    # catch-all "other"
+    palette[GRADE_OTHER] = "#aaaaaa"
+    return palette
+
+
+def _build_group_label() -> dict[int, str]:
+    """
+    Build grouped-spectrum labels dynamically from _GRADE_DEFS.
+    Returns {first_grade_id_in_group: label_string}.
+    """
+    from ..lib.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
+    from collections import defaultdict
+
+    # Group grade IDs by label prefix
+    groups: dict[str, list[int]] = defaultdict(list)
+    for gid, label, _ in _GRADE_DEFS:
+        prefix = label.split()[0]   # e.g. "double" from "double"
+        groups[prefix].append(gid)
+
+    result: dict[int, str] = {}
+    for prefix, gids in groups.items():
+        gids_sorted = sorted(gids)
+        key = gids_sorted[0]
+        if len(gids_sorted) == 1:
+            label_str = f"{prefix} (G{gids_sorted[0]})"
+        else:
+            label_str = f"{prefix} (G{gids_sorted[0]}-{gids_sorted[-1]})"
+        result[key] = label_str
+
+    result[GRADE_OTHER] = f"other (G{GRADE_OTHER})"
+    return result
+
+
+# Build at module load time — rebuilt automatically when _GRADE_DEFS changes
+_GRADE_PALETTE = _build_grade_palette()
+_GROUP_LABEL   = _build_group_label()
 
 
 def plot_hitmap(hit_count: np.ndarray, mean_adu: np.ndarray,
@@ -480,30 +529,54 @@ def plot_spectrum(spectra: dict[int, np.ndarray], bin_edges: np.ndarray,
     fig.suptitle(f"Fe-55 Spectrum  ({title_suffix})", fontsize=13,
                  fontweight="bold")
 
-    # Panel 1: per-grade
+    # Panel 1: per-grade — iterate only over grades that exist in palette
     ax = axes[0]
-    for g in range(N_GRADES):
-        if spectra.get(g, np.array([])).sum() == 0:
+    for g in sorted(_GRADE_PALETTE.keys()):
+        counts = spectra.get(g, None)
+        if counts is None or counts.sum() == 0:
             continue
-        ax.step(centres, spectra[g], where="mid",
+        ax.step(centres, counts, where="mid",
                 color=_GRADE_PALETTE[g], alpha=0.75, lw=0.9,
                 label=f"G{g} {GRADE_NAMES.get(g,'')}")
     ax.set_xlabel("Summed ADU (cluster)"); ax.set_ylabel("Counts / bin")
     ax.set_title("Per-Grade  (cluster-summed charge)")
     ax.set_yscale("log"); ax.grid(alpha=0.3); ax.legend(fontsize=7, ncol=2)
 
-    # Panel 2: grouped
+    # Panel 2: grouped — built dynamically from _GRADE_DEFS
     ax2 = axes[1]
-    groups = [(0,[0]),(1,[1,2,3,4]),(5,[5,6,7,8]),(9,[9,10,11,12]),(13,[13])]
-    for gkey, gids in groups:
-        total = sum(spectra.get(g, np.zeros(len(centres), dtype=int)) for g in gids)
+    from ..lib.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
+    from collections import defaultdict
+
+    # Re-group by label prefix (same logic as _build_group_label)
+    prefix_groups: dict[str, list[int]] = defaultdict(list)
+    for gid, label, _ in _GRADE_DEFS:
+        prefix_groups[label.split()[0]].append(gid)
+
+    for prefix, gids in sorted(prefix_groups.items(),
+                                key=lambda kv: min(kv[1])):
+        gids_sorted = sorted(gids)
+        total = sum(spectra.get(g, np.zeros(len(centres), dtype=int))
+                    for g in gids_sorted)
         if total.sum() == 0:
             continue
+        key = gids_sorted[0]
         ax2.step(centres, total, where="mid",
-                 color=_GRADE_PALETTE[gkey], lw=1.2, alpha=0.9,
-                 label=_GROUP_LABEL[gkey])
+                 color=_GRADE_PALETTE.get(key, "#aaaaaa"),
+                 lw=1.2, alpha=0.9,
+                 label=_GROUP_LABEL.get(key, prefix))
+
+    # "other" group
+    other_counts = spectra.get(GRADE_OTHER,
+                               np.zeros(len(centres), dtype=int))
+    if other_counts.sum() > 0:
+        ax2.step(centres, other_counts, where="mid",
+                 color=_GRADE_PALETTE[GRADE_OTHER],
+                 lw=1.2, alpha=0.9,
+                 label=_GROUP_LABEL[GRADE_OTHER])
+
+    # All-grades sum
     all_c = sum(spectra.get(g, np.zeros(len(centres), dtype=int))
-                for g in range(N_GRADES))
+                for g in _GRADE_PALETTE.keys())
     ax2.step(centres, all_c, where="mid", color="black",
              lw=1.0, ls="--", alpha=0.8, label="all grades (cluster sum)")
     ax2.set_xlabel("Summed ADU (cluster)"); ax2.set_ylabel("Counts / bin")
@@ -539,16 +612,17 @@ def plot_spectrum(spectra: dict[int, np.ndarray], bin_edges: np.ndarray,
 
 def plot_grade_distribution(events: np.ndarray, out_dir: Path) -> None:
     """Bar chart of event count per grade."""
-    counts = np.zeros(N_GRADES, dtype=int)
-    for g in range(N_GRADES):
-        counts[g] = int((events["grade"] == g).sum())
+    # Build grade list dynamically so new grades are picked up automatically
+    all_grades = sorted(_GRADE_PALETTE.keys())
+    counts     = [int((events["grade"] == g).sum()) for g in all_grades]
+    labels     = [f"G{g}" for g in all_grades]
+    colours    = [_GRADE_PALETTE[g] for g in all_grades]
 
-    fig, ax = plt.subplots(figsize=(12, 4))
-    bars = ax.bar(range(N_GRADES), counts,
-                  color=[_GRADE_PALETTE[g] for g in range(N_GRADES)],
-                  edgecolor="white", lw=0.5)
-    ax.set_xticks(range(N_GRADES))
-    ax.set_xticklabels([f"G{g}" for g in range(N_GRADES)], fontsize=8)
+    fig, ax = plt.subplots(figsize=(max(12, len(all_grades)), 4))
+    bars = ax.bar(range(len(all_grades)), counts,
+                  color=colours, edgecolor="white", lw=0.5)
+    ax.set_xticks(range(len(all_grades)))
+    ax.set_xticklabels(labels, fontsize=8)
     ax.set_xlabel("Grade"); ax.set_ylabel("Event count")
     ax.set_title("Event Count per Grade", fontsize=12, fontweight="bold")
     ax.set_yscale("log"); ax.grid(axis="y", alpha=0.3)
