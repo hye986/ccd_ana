@@ -121,17 +121,19 @@ _DEFAULTS: dict[str, Any] = {
         },
     },
     "gain_calibration": {
-        "events_file":       None,    # input: relative to data_dir then output_dir
-        "output_file":       None,    # output: relative to output_dir
-        "target_ev":         5895.0,  # Mn Kα reference energy [eV]
-        "fit_window_frac":   0.20,    # Gaussian fit window ± fraction of target
-        "rough_min_events":  100,     # Phase 1: min single events per parity
-        "cti_row_bin_size":  64,      # Phase 3: rows per CTI bin
-        "cti_min_events":    50,      # Phase 3: min events per row bin
-        "cti_grade_filter":  None,    # None = all grades
-        "col_min_events":    30,      # Phase 4: min events per column
-        "col_with_bg":       False,   # Phase 4: Gaussian + linear background
-        "col_grade_filter":  [0],     # Phase 4: grades used (singles default)
+        "events_file":       None,
+        "output_file":       None,
+        "target_ev":         5895.0,
+        "kalpha_adu":        None,    # REQUIRED: expected Kα peak in ADU
+        "kalpha_adu_window": 0.20,    # Phase 1 fit window ± fraction of kalpha_adu
+        "fit_window_frac":   0.15,    # Phases 3+4 fit window ± fraction of target_ev
+        "rough_min_events":  100,
+        "cti_row_bin_size":  64,
+        "cti_min_events":    50,
+        "cti_grade_filter":  None,
+        "col_min_events":    30,
+        "col_with_bg":       False,
+        "col_grade_filter":  [0],
         "save_plots":        True,
     },
 }
@@ -340,7 +342,12 @@ gain_calibration:
   events_file: null             # null = use {output_dir}/events.h5
   output_file: null             # null = use {output_dir}/gain_calibration.h5
   target_ev: 5895.0             # Mn Kα reference energy [eV]
-  fit_window_frac: 0.20         # Gaussian fit window ± fraction of target
+  kalpha_adu: 15000             # REQUIRED: Kα peak position in ADU
+                                # read this from your source_ana spectrum plot
+                                # (the peak of single-pixel events in adu_sum)
+  kalpha_adu_window: 0.20       # Phase 1 fit window ± this fraction of kalpha_adu
+                                # e.g. 0.20 → fit between 12000 and 18000 ADU
+  fit_window_frac: 0.15         # Phases 3+4 fit window ± fraction of target_ev [eV]
   rough_min_events: 100         # Phase 1: min single events per parity pool
   cti_row_bin_size: 64          # Phase 3: rows per CTI bin
   cti_min_events: 50            # Phase 3: min events per row bin
@@ -349,9 +356,6 @@ gain_calibration:
   col_with_bg: false            # Phase 4: add linear background to Gaussian fit
   col_grade_filter: [0]         # Phase 4: grades used for per-column fit
   save_plots: true
-
-# cti_calibration:                  # uncomment and fill in for CTI step
-#   events_file: run0001/events.h5
 """
 
 

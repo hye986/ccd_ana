@@ -47,15 +47,22 @@ import numpy as np
 from ..config import Config
 from ..lib.calibration import (
     MN_KALPHA_EV,
+    MN_KBETA_EV,
+    SINGLE_GRADES,
+    SPLIT_GRADES,
     RoughGainCalibrator,
     CtiCalibrator,
     ColumnGainCalibrator,
     apply_rough_gain,
     apply_full_calibration,
+    fit_peak,
+    _gaussian,
     RoughGainResult,
     CtiResult,
     ColumnGainResult,
 )
+from ..lib.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
+from ..utils.plotting import _build_grade_palette, _build_group_label
 from ..utils.io_h5 import load_events_h5
 
 
@@ -201,47 +208,65 @@ def load_gain_cal_h5(path: str | Path) -> dict:
 def _plot_rough_gain(rough: RoughGainResult,
                      events: np.ndarray,
                      out_dir: Path,
-                     target_ev: float) -> None:
+                     target_ev: float,
+                     kalpha_adu: float,
+                     kalpha_window: float) -> None:
     """Phase 1: ADU histograms for even/odd single-pixel events."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from ..lib.calibration import SINGLE_GRADES
-    singles = events[np.isin(events["grade"], list(SINGLE_GRADES))]
+    singles   = events[np.isin(events["grade"], list(SINGLE_GRADES))]
     even_mask = (singles["X"] % 2) == 0
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle("Phase 1 — Rough Gain: Single-pixel ADU spectra",
                  fontsize=13, fontweight="bold")
 
+    lo_adu = kalpha_adu * (1.0 - kalpha_window)
+    hi_adu = kalpha_adu * (1.0 + kalpha_window)
+
     for ax, mask, label, res, g in [
-        (axes[0], even_mask,  "Even columns",
-         rough.peak_even, rough.g_even),
-        (axes[1], ~even_mask, "Odd columns",
-         rough.peak_odd,  rough.g_odd),
+        (axes[0], even_mask,  "Even columns", rough.peak_even, rough.g_even),
+        (axes[1], ~even_mask, "Odd columns",  rough.peak_odd,  rough.g_odd),
     ]:
         adu = singles["adu_sum"][mask]
         if len(adu) == 0:
             ax.set_title(f"{label} — no data")
             continue
-        lo = target_ev * 0.5 / g if (g and np.isfinite(g)) else float(np.percentile(adu, 1))
-        hi = target_ev * 1.5 / g if (g and np.isfinite(g)) else float(np.percentile(adu, 99))
-        ax.hist(adu, bins=120, range=(max(lo, 0), hi),
+
+        # Show a wider view (±40%) so the user can see the full peak context
+        view_lo = kalpha_adu * 0.60
+        view_hi = kalpha_adu * 1.40
+        ax.hist(adu, bins=150, range=(view_lo, view_hi),
                 color="steelblue", alpha=0.75, label=f"N={len(adu):,}")
+
+        # Mark the fit window
+        ax.axvspan(lo_adu, hi_adu, alpha=0.12, color="red",
+                   label=f"Fit window [{lo_adu:.0f}, {hi_adu:.0f}]")
+
         if res.success:
-            xs = np.linspace(max(lo, 0), hi, 300)
-            from ..lib.calibration import _gaussian
+            xs = np.linspace(lo_adu, hi_adu, 300)
             ys = _gaussian(xs, res.amplitude, res.peak_ev, res.sigma_ev)
             ax.plot(xs, ys, "r-", lw=2,
                     label=f"Kα fit: {res.peak_ev:.1f} ADU\n"
-                          f"G={g:.4f} eV/ADU")
+                          f"G = {g:.5f} eV/ADU\n"
+                          f"σ = {res.sigma_ev:.1f} ADU")
             ax.axvline(res.peak_ev, color="red", lw=1, ls="--")
-        ax.set_xlabel("ADU (adu_sum, single events)")
+            ax.axvline(kalpha_adu,  color="gray", lw=1, ls=":",
+                       label=f"kalpha_adu = {kalpha_adu:.0f}")
+
+        ax.set_xlabel("ADU  (adu_sum, grade-0 single events)")
         ax.set_ylabel("Counts / bin")
         ax.set_title(label)
         ax.legend(fontsize=8)
         ax.grid(alpha=0.3)
+
+        # Second x-axis in eV using the fitted gain
+        if res.success and g > 0 and np.isfinite(g):
+            ax2 = ax.twiny()
+            ax2.set_xlim(np.array(ax.get_xlim()) * g)
+            ax2.set_xlabel("Energy [eV]  (using fitted gain)", fontsize=8)
 
     plt.tight_layout()
     p = out_dir / "cal_phase1_rough_gain.png"
@@ -361,52 +386,473 @@ def _plot_column_gain(col_result: ColumnGainResult, out_dir: Path,
     print(f"  → {p}")
 
 
+def _plot_cti_per_col(events: np.ndarray,
+                      e_cti: np.ndarray,
+                      cti_result: CtiResult,
+                      out_dir: Path,
+                      target_ev: float,
+                      n_rows: int,
+                      row_bin_size: int = 64,
+                      min_events_per_bin: int = 20) -> None:
+    """
+    Per-column CTI: for each column fit peak-vs-row slope and extract a
+    local CTI coefficient.
+
+    Because single columns have limited statistics, events are grouped
+    into column bins (default 8 columns per bin) before fitting.
+    The global CTI from Phase 3 is shown as a horizontal reference line.
+
+    Panel 1 : local CTI vs column index
+    Panel 2 : histogram of per-column-bin CTI values
+    Panel 3 : 2-D heat map of peak position vs (col_bin, row_bin)
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    # Use singles only for this diagnostic (best energy resolution)
+    s_mask = np.isin(events["grade"], list(SINGLE_GRADES))
+    ev_s   = events[s_mask]
+    ec_s   = e_cti[s_mask]
+
+    n_cols_total = int(events["X"].max()) + 1
+
+    # Choose column bin size so each bin has ~enough statistics
+    # Default: 8 columns per bin (adjustable)
+    col_bin_size = max(1, n_cols_total // 64)   # ≤64 bins across the detector
+    col_edges    = np.arange(0, n_cols_total + col_bin_size, col_bin_size)
+    col_centres  = 0.5 * (col_edges[:-1] + col_edges[1:])
+    n_cbins      = len(col_centres)
+
+    row_edges    = np.arange(0, n_rows + row_bin_size, row_bin_size)
+    row_centres  = 0.5 * (row_edges[:-1] + row_edges[1:])
+    n_rbins      = len(row_centres)
+
+    # Arrays to fill
+    cti_per_cbin = np.full(n_cbins, np.nan)
+    cti_success  = np.zeros(n_cbins, dtype=bool)
+
+    # 2-D peak map: (col_bin, row_bin)
+    peak_map     = np.full((n_cbins, n_rbins), np.nan)
+
+    x_coords = ev_s["X"].astype(int)
+    y_coords = ev_s["Y"].astype(int)
+
+    for ci, (x0, x1) in enumerate(zip(col_edges[:-1], col_edges[1:])):
+        cx_mask = (x_coords >= x0) & (x_coords < x1)
+        if cx_mask.sum() < min_events_per_bin * 2:
+            continue
+
+        row_peaks  = []
+        row_rows   = []
+
+        for ri, (y0, y1) in enumerate(zip(row_edges[:-1], row_edges[1:])):
+            bm = cx_mask & (y_coords >= y0) & (y_coords < y1)
+            if bm.sum() < min_events_per_bin:
+                continue
+            res = fit_peak(ec_s[bm], nominal=target_ev,
+                           window_frac=0.12, n_bins=40,
+                           min_events=min_events_per_bin)
+            if res.success:
+                row_peaks.append(res.peak_ev)
+                row_rows.append(row_centres[ri])
+                peak_map[ci, ri] = res.peak_ev
+
+        if len(row_peaks) < 2:
+            continue
+
+        # Linear fit: peak = E0 * (1 - row * CTI_local)
+        rr = np.array(row_rows)
+        pp = np.array(row_peaks)
+        coeffs = np.polyfit(rr, pp, 1)
+        slope, e0_local = coeffs
+        cti_local = -slope / e0_local if e0_local != 0 else 0.0
+        cti_per_cbin[ci] = cti_local
+        cti_success[ci]  = True
+
+    # Global CTI for reference
+    global_cti = cti_result.cti
+    valid_cti  = cti_per_cbin[cti_success]
+    mean_cti   = float(np.nanmean(valid_cti)) if len(valid_cti) else global_cti
+
+    fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+    fig.suptitle(
+        f"CTI per Column Bin  "
+        f"(global CTI = {global_cti:.3e} /pixel,  "
+        f"mean local = {mean_cti:.3e} /pixel)",
+        fontsize=13, fontweight="bold")
+
+    # ── Panel 1: local CTI vs column bin centre ───────────────────────────────
+    ax = axes[0]
+    good_c = col_centres[cti_success]
+    good_v = cti_per_cbin[cti_success]
+
+    ax.scatter(good_c, good_v, s=20, color="steelblue", zorder=3,
+               label=f"Local CTI  ({cti_success.sum()} col bins)")
+    ax.axhline(global_cti, color="red", lw=1.5, ls="--",
+               label=f"Global CTI = {global_cti:.3e}")
+    ax.axhline(mean_cti,   color="darkorange", lw=1.2, ls="-.",
+               label=f"Mean local = {mean_cti:.3e}")
+    ax.axhline(0, color="k", lw=0.5, ls=":")
+    ax.set_xlabel("Column (X)")
+    ax.set_ylabel("CTI  [1/pixel]")
+    ax.set_title("Local CTI per column bin\n"
+                 f"(each bin = {col_bin_size} cols × all rows)")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+
+    if len(valid_cti) > 1:
+        ax.text(0.97, 0.97,
+                f"mean = {mean_cti:.3e}\n"
+                f"std  = {float(np.nanstd(valid_cti)):.3e}\n"
+                f"min  = {float(np.nanmin(valid_cti)):.3e}\n"
+                f"max  = {float(np.nanmax(valid_cti)):.3e}",
+                transform=ax.transAxes, ha="right", va="top", fontsize=8,
+                bbox=dict(boxstyle="round", fc="white", alpha=0.85))
+
+    # ── Panel 2: histogram of local CTI values ────────────────────────────────
+    ax2 = axes[1]
+    if len(valid_cti) > 1:
+        lo_c = float(np.percentile(valid_cti, 2))
+        hi_c = float(np.percentile(valid_cti, 98))
+        margin = (hi_c - lo_c) * 0.4
+        ax2.hist(valid_cti, bins=min(30, len(valid_cti)),
+                 range=(lo_c - margin, hi_c + margin),
+                 color="steelblue", alpha=0.75,
+                 label=f"N = {len(valid_cti)} col bins")
+        ax2.axvline(mean_cti,   color="darkorange", lw=1.5, ls="-.",
+                    label=f"Mean = {mean_cti:.3e}")
+        ax2.axvline(global_cti, color="red", lw=1.5, ls="--",
+                    label=f"Global = {global_cti:.3e}")
+        ax2.axvline(0, color="k", lw=0.5, ls=":")
+    ax2.set_xlabel("CTI  [1/pixel]")
+    ax2.set_ylabel("Column bins")
+    ax2.set_title("Distribution of local CTI values")
+    ax2.legend(fontsize=8)
+    ax2.grid(alpha=0.3)
+
+    # ── Panel 3: 2-D heat map: peak position vs (col_bin, row_bin) ────────────
+    ax3 = axes[2]
+    # peak_map shape: (n_cbins, n_rbins) — transpose for imshow (row_bin on Y)
+    img_data = peak_map.T   # shape (n_rbins, n_cbins)
+    finite = img_data[np.isfinite(img_data)]
+    if len(finite):
+        vlo = float(np.percentile(finite, 2))
+        vhi = float(np.percentile(finite, 98))
+        im = ax3.imshow(img_data, origin="lower", aspect="auto",
+                        cmap="RdYlGn",
+                        vmin=vlo, vmax=vhi,
+                        extent=[col_edges[0], col_edges[-1],
+                                row_edges[0], row_edges[-1]])
+        plt.colorbar(im, ax=ax3, fraction=0.046, pad=0.04,
+                     label="Kα peak [eV]")
+    ax3.set_xlabel("Column (X)")
+    ax3.set_ylabel("Row (Y)")
+    ax3.set_title("Kα peak position [eV]\nvs (column bin, row bin)\n"
+                  "(after CTI correction — should be uniform)")
+
+    # Annotate global CTI on panel 3
+    ax3.text(0.02, 0.98,
+             f"Global CTI = {global_cti:.3e} /pixel\n"
+             f"Mean local = {mean_cti:.3e} /pixel",
+             transform=ax3.transAxes, va="top", fontsize=8,
+             bbox=dict(boxstyle="round", fc="white", alpha=0.85))
+
+    plt.tight_layout()
+    p = out_dir / "cal_cti_per_col.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  → {p}")
+
+
+def _plot_pixel_gain_map(rough: RoughGainResult,
+                         col_result: ColumnGainResult,
+                         out_dir: Path,
+                         target_ev: float) -> None:
+    """
+    Histogram of the effective per-pixel gain across all columns.
+
+    The effective gain for pixel at column X is:
+        G_eff(X) = G_rough(parity) × f_col(X)   [eV/ADU]
+
+    This combines the even/odd rough gain from Phase 1 with the
+    per-column fine-tuning factor from Phase 4.
+
+    Panel 1 : G_eff vs column index  (scatter, coloured by parity)
+    Panel 2 : Histogram of G_eff for all columns
+    Panel 3 : f_col vs column index  (Phase 4 fine factor only)
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_cols   = len(col_result.f_col)
+    cols     = np.arange(n_cols)
+    parity   = cols % 2   # 0=even, 1=odd
+
+    g_rough  = np.where(parity == 0,
+                        float(rough.g_even),
+                        float(rough.g_odd)).astype(np.float64)
+    g_eff    = g_rough * col_result.f_col.astype(np.float64)
+
+    good     = col_result.success_col
+    g_fitted = g_eff[good]
+
+    fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+    fig.suptitle("Per-Pixel Gain Map  (G_rough × f_col)",
+                 fontsize=13, fontweight="bold")
+
+    # ── Panel 1: G_eff vs column ──────────────────────────────────────────────
+    ax = axes[0]
+    even_cols = cols[(parity == 0) & good]
+    odd_cols  = cols[(parity == 1) & good]
+    ax.scatter(even_cols, g_eff[(parity == 0) & good],
+               s=6, color="#2176ae", alpha=0.7, label="Even cols")
+    ax.scatter(odd_cols,  g_eff[(parity == 1) & good],
+               s=6, color="#f7931e", alpha=0.7, label="Odd cols")
+    # Show unfitted columns as grey
+    if (~good).any():
+        ax.scatter(cols[~good], g_eff[~good],
+                   s=6, color="lightgray", alpha=0.5, label="Default (no fit)")
+    ax.axhline(float(rough.g_even), color="#2176ae", lw=1, ls="--",
+               label=f"G_even = {rough.g_even:.5f}")
+    ax.axhline(float(rough.g_odd),  color="#f7931e", lw=1, ls="--",
+               label=f"G_odd  = {rough.g_odd:.5f}")
+    ax.set_xlabel("Column (X)")
+    ax.set_ylabel("G_eff  [eV / ADU]")
+    ax.set_title("Effective gain per column")
+    ax.legend(fontsize=7)
+    ax.grid(alpha=0.3)
+
+    if len(g_fitted):
+        mean_g = float(g_fitted.mean())
+        std_g  = float(g_fitted.std())
+        ax.text(0.97, 0.03,
+                f"mean = {mean_g:.5f} eV/ADU\n"
+                f"σ    = {std_g:.5f} eV/ADU\n"
+                f"σ/μ  = {std_g/mean_g*100:.2f}%",
+                transform=ax.transAxes, ha="right", va="bottom", fontsize=8,
+                bbox=dict(boxstyle="round", fc="white", alpha=0.85))
+
+    # ── Panel 2: Histogram of G_eff ───────────────────────────────────────────
+    ax2 = axes[1]
+    if len(g_fitted) > 0:
+        lo_g = float(np.percentile(g_fitted, 1))
+        hi_g = float(np.percentile(g_fitted, 99))
+        margin = (hi_g - lo_g) * 0.3
+        lo_g = max(lo_g - margin, 0)
+        hi_g = hi_g + margin
+
+        # Split by parity for stacked histogram
+        g_even_fit = g_eff[(parity == 0) & good]
+        g_odd_fit  = g_eff[(parity == 1) & good]
+
+        bins_g = np.linspace(lo_g, hi_g, 60)
+        ax2.hist(g_even_fit, bins=bins_g, color="#2176ae", alpha=0.65,
+                 label=f"Even (N={len(g_even_fit)})")
+        ax2.hist(g_odd_fit,  bins=bins_g, color="#f7931e", alpha=0.65,
+                 label=f"Odd  (N={len(g_odd_fit)})")
+
+        # Combined stats
+        mean_g = float(g_fitted.mean())
+        std_g  = float(g_fitted.std())
+        ax2.axvline(mean_g, color="black", lw=1.5, ls="-",
+                    label=f"Mean = {mean_g:.5f}")
+        ax2.axvline(float(rough.g_even), color="#2176ae", lw=1.2, ls="--",
+                    label=f"G_even = {rough.g_even:.5f}")
+        ax2.axvline(float(rough.g_odd),  color="#f7931e", lw=1.2, ls="--",
+                    label=f"G_odd  = {rough.g_odd:.5f}")
+        ax2.text(0.97, 0.97,
+                 f"All fitted columns:\n"
+                 f"mean = {mean_g:.5f} eV/ADU\n"
+                 f"std  = {std_g:.5f} eV/ADU\n"
+                 f"σ/μ  = {std_g/mean_g*100:.3f}%",
+                 transform=ax2.transAxes, ha="right", va="top", fontsize=8,
+                 bbox=dict(boxstyle="round", fc="white", alpha=0.85))
+
+    ax2.set_xlabel("G_eff  [eV / ADU]")
+    ax2.set_ylabel("Columns")
+    ax2.set_title("Gain distribution across all columns")
+    ax2.legend(fontsize=8)
+    ax2.grid(alpha=0.3)
+
+    # ── Panel 3: f_col fine factor ────────────────────────────────────────────
+    ax3 = axes[2]
+    ax3.scatter(cols[good],  col_result.f_col[good],
+                s=6, color="steelblue", alpha=0.7,
+                label=f"Fitted ({good.sum()} cols)")
+    if (~good).any():
+        ax3.scatter(cols[~good], col_result.f_col[~good],
+                    s=6, color="lightgray", alpha=0.5,
+                    label=f"Default=1 ({(~good).sum()} cols)")
+    ax3.axhline(1.0, color="k", lw=0.8, ls="--", label="f=1 (no correction)")
+
+    if good.sum() > 0:
+        f_vals = col_result.f_col[good]
+        ax3.text(0.97, 0.03,
+                 f"mean = {f_vals.mean():.4f}\n"
+                 f"std  = {f_vals.std():.4f}\n"
+                 f"min  = {f_vals.min():.4f}\n"
+                 f"max  = {f_vals.max():.4f}",
+                 transform=ax3.transAxes, ha="right", va="bottom", fontsize=8,
+                 bbox=dict(boxstyle="round", fc="white", alpha=0.85))
+
+    ax3.set_xlabel("Column (X)")
+    ax3.set_ylabel("f_col  (fine gain factor)")
+    ax3.set_title("Phase-4 per-column fine factor")
+    ax3.legend(fontsize=8)
+    ax3.grid(alpha=0.3)
+
+    plt.tight_layout()
+    p = out_dir / "cal_pixel_gain_map.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  → {p}")
+
+
 def _plot_final_spectrum(events: np.ndarray,
                          energy_ev: np.ndarray,
                          out_dir: Path,
                          target_ev: float) -> None:
-    """Calibrated energy spectrum overlaid with Kα / Kβ markers."""
+    """
+    Calibrated energy spectrum for ALL grades with Kα resolution fit.
+
+    Grade groups, colours and labels are derived entirely from
+    _GRADE_DEFS + GRADE_OTHER at call time — adding or removing grades
+    in pattern_recognition.py automatically updates this plot.
+
+    Panel 1 (log scale)  : per-grade-group spectra
+    Panel 2 (linear)     : all-grades sum with Gaussian fit to Kα peak
+                           → energy resolution FWHM and R = FWHM/E
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from ..lib.calibration import MN_KBETA_EV, SINGLE_GRADES, SPLIT_GRADES
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
-    fig.suptitle("Final Calibrated Fe-55 Spectrum",
+    from ..lib.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
+    from ..utils.plotting import _build_grade_palette, _build_group_label
+
+    # Both dicts are keyed by the *first* grade ID in each group.
+    # _build_grade_palette : grade_id → colour string
+    # _build_group_label   : first_grade_id_in_group → label string
+    palette     = _build_grade_palette()   # {grade_id: colour}
+    group_label = _build_group_label()     # {first_gid: label_str}
+
+    # Build ordered list of (group_key, [grade_ids], colour, label)
+    # by grouping _GRADE_DEFS entries by their label prefix, then appending
+    # GRADE_OTHER — identical logic to _build_group_label() so the two
+    # are always in sync.
+    from collections import defaultdict
+    prefix_to_gids: dict[str, list[int]] = defaultdict(list)
+    for gid, label, _ in _GRADE_DEFS:
+        prefix = label.split()[0]
+        prefix_to_gids[prefix].append(gid)
+
+    # Ordered list of groups: [(first_gid, all_gids_in_group)]
+    groups: list[tuple[int, list[int]]] = []
+    for prefix, gids in sorted(prefix_to_gids.items(),
+                                key=lambda kv: min(kv[1])):
+        gids_sorted = sorted(gids)
+        groups.append((gids_sorted[0], gids_sorted))
+    # Append the catch-all "other" group
+    groups.append((GRADE_OTHER, [GRADE_OTHER]))
+
+    # Energy axis
+    lo      = target_ev * 0.60
+    hi      = MN_KBETA_EV * 1.30
+    bins    = np.linspace(lo, hi, 350)
+    centres = 0.5 * (bins[:-1] + bins[1:])
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6))
+    fig.suptitle("Final Calibrated Fe-55 Spectrum — All Grades",
                  fontsize=13, fontweight="bold")
 
-    lo = target_ev * 0.6
-    hi = MN_KBETA_EV * 1.3
-    bins = np.linspace(lo, hi, 300)
+    # ── Panel 1: per-group log scale ──────────────────────────────────────────
+    ax1 = axes[0]
+    all_counts = np.zeros(len(centres), dtype=np.float64)
 
-    grade_groups = {
-        "singles (G0)":    np.isin(events["grade"], list(SINGLE_GRADES)),
-        "doubles (G1-4)":  np.isin(events["grade"], [1,2,3,4]),
-        "triples (G5-8)":  np.isin(events["grade"], [5,6,7,8]),
-        "quads (G9-12)":   np.isin(events["grade"], [9,10,11,12]),
-    }
-    colours = ["#2176ae", "#f7931e", "#57cc99", "#c77dff"]
+    for first_gid, gids in groups:
+        mask = np.isin(events["grade"], gids)
+        if not mask.any():
+            continue
+        e    = energy_ev[mask]
+        c, _ = np.histogram(e, bins=bins)
+        all_counts += c.astype(np.float64)
 
-    for ax, yscale in zip(axes, ["log", "linear"]):
-        for (label, mask), col in zip(grade_groups.items(), colours):
-            e = energy_ev[mask]
-            if len(e) == 0:
-                continue
-            c, _ = np.histogram(e, bins=bins)
-            centres = 0.5 * (bins[:-1] + bins[1:])
-            ax.step(centres, c, where="mid", color=col, lw=1.0,
-                    alpha=0.85, label=label)
+        colour    = palette.get(first_gid, "#aaaaaa")
+        lbl       = group_label.get(first_gid, f"G{first_gid}")
+        n_ev      = int(mask.sum())
+        ax1.step(centres, c, where="mid", color=colour,
+                 lw=1.1, alpha=0.85,
+                 label=f"{lbl}  N={n_ev:,}")
 
-        ax.axvline(target_ev,  color="red",  lw=1.2, ls="--",
-                   label=f"Mn Kα {target_ev:.0f} eV")
-        ax.axvline(MN_KBETA_EV, color="blue", lw=1.2, ls="--",
-                   label=f"Mn Kβ {MN_KBETA_EV:.0f} eV")
-        ax.set_xlabel("Energy [eV]")
-        ax.set_ylabel("Counts / bin")
-        ax.set_title(f"{'Log' if yscale == 'log' else 'Linear'} scale")
-        ax.set_yscale(yscale)
-        ax.legend(fontsize=8)
-        ax.grid(alpha=0.3)
+    ax1.step(centres, all_counts, where="mid", color="black",
+             lw=1.3, ls="--", alpha=0.7,
+             label=f"All grades  N={len(events):,}")
+    ax1.axvline(target_ev,   color="red",  lw=1.2, ls="--",
+                label=f"Mn Kα {target_ev:.0f} eV")
+    ax1.axvline(MN_KBETA_EV, color="blue", lw=1.2, ls="--",
+                label=f"Mn Kβ {MN_KBETA_EV:.0f} eV")
+    ax1.set_xlabel("Energy [eV]")
+    ax1.set_ylabel("Counts / bin")
+    ax1.set_title("Per-grade group  (log scale)")
+    ax1.set_yscale("log")
+    ax1.legend(fontsize=7, ncol=2)
+    ax1.grid(alpha=0.3)
+
+    # ── Panel 2: all-grades sum + Kα Gaussian fit ─────────────────────────────
+    ax2 = axes[1]
+    ax2.step(centres, all_counts, where="mid", color="steelblue",
+             lw=1.2, alpha=0.9,
+             label=f"All grades  N={len(events):,}")
+
+    fit_window = 0.12
+    res = fit_peak(energy_ev, nominal=target_ev,
+                   window_frac=fit_window, n_bins=150,
+                   min_events=50, with_bg=False)
+
+    if res.success:
+        fwhm   = 2.3548 * res.sigma_ev
+        resoln = fwhm / res.peak_ev * 100.0
+
+        xs = np.linspace(target_ev * (1 - fit_window),
+                         target_ev * (1 + fit_window), 500)
+        ys = _gaussian(xs, res.amplitude, res.peak_ev, res.sigma_ev)
+        ax2.plot(xs, ys, "r-", lw=2.5,
+                 label=(f"Gaussian fit\n"
+                        f"Peak = {res.peak_ev:.1f} eV\n"
+                        f"σ    = {res.sigma_ev:.1f} eV\n"
+                        f"FWHM = {fwhm:.1f} eV\n"
+                        f"R    = {resoln:.2f}%"))
+        ax2.axvline(res.peak_ev, color="red", lw=1, ls="--", alpha=0.6)
+        half_max = res.amplitude / 2.0
+        ax2.hlines(half_max,
+                   res.peak_ev - res.sigma_ev * 1.1774,
+                   res.peak_ev + res.sigma_ev * 1.1774,
+                   colors="red", lw=1.5, ls=":",
+                   label=f"FWHM = {fwhm:.1f} eV")
+        ax2.axvspan(target_ev * (1 - fit_window),
+                    target_ev * (1 + fit_window),
+                    alpha=0.07, color="red", label="Fit window")
+
+        print(f"\n  ── Kα energy resolution ──")
+        print(f"     Peak  = {res.peak_ev:.2f} eV")
+        print(f"     σ     = {res.sigma_ev:.2f} eV")
+        print(f"     FWHM  = {fwhm:.2f} eV")
+        print(f"     R     = {resoln:.3f}%")
+        print(f"     N_fit = {res.n_events:,} events in fit window")
+    else:
+        print(f"  ⚠ Kα resolution fit failed: {res.message}")
+
+    ax2.axvline(target_ev,   color="red",  lw=1.2, ls="--", alpha=0.5)
+    ax2.axvline(MN_KBETA_EV, color="blue", lw=1.2, ls="--", alpha=0.5,
+                label=f"Mn Kβ {MN_KBETA_EV:.0f} eV")
+    ax2.set_xlabel("Energy [eV]")
+    ax2.set_ylabel("Counts / bin")
+    ax2.set_title("All-grades sum  (linear scale) + Kα resolution fit")
+    ax2.legend(fontsize=8)
+    ax2.grid(alpha=0.3)
+    ax2.set_xlim(lo, hi)
 
     plt.tight_layout()
     p = out_dir / "cal_final_spectrum.png"
@@ -429,7 +875,6 @@ def _plot_cti_correction_check(events: np.ndarray,
     fig.suptitle("CTI Correction Check — Peak position vs Row",
                  fontsize=13, fontweight="bold")
 
-    from ..lib.calibration import SINGLE_GRADES, fit_peak, MN_KALPHA_EV
     s_mask = np.isin(events["grade"], list(SINGLE_GRADES))
 
     for ax, ep, label, colour in [
@@ -498,6 +943,27 @@ def run(cfg: Config) -> dict:
     out_dir = cfg.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    target_ev    = float(gc["target_ev"])
+    window_frac  = float(gc["fit_window_frac"])
+
+    # ── Validate kalpha_adu (must be set by user) ─────────────────────────────
+    kalpha_adu = gc.get("kalpha_adu")
+    if kalpha_adu is None:
+        raise ValueError(
+            "gain_calibration.kalpha_adu is not set in your analysis.yaml.\n"
+            "  Open your source_ana spectrum plot (spectrum_full_detector.png),\n"
+            "  read the Kα peak position in ADU for single-pixel events,\n"
+            "  and add it to your config:\n\n"
+            "    gain_calibration:\n"
+            "      kalpha_adu: 15000    # your value here\n")
+    kalpha_adu     = float(kalpha_adu)
+    kalpha_window  = float(gc.get("kalpha_adu_window", 0.20))
+
+    print(f"  Kα peak (user-supplied): {kalpha_adu:.0f} ADU  "
+          f"(window ±{kalpha_window:.0%})")
+    print(f"  Target energy: {target_ev:.1f} eV  →  "
+          f"expected gain ≈ {target_ev/kalpha_adu:.4f} eV/ADU")
+
     # ── Resolve input events file ─────────────────────────────────────────────
     events_file = gc.get("events_file") or None
     if events_file:
@@ -540,8 +1006,9 @@ def run(cfg: Config) -> dict:
     # ── Phase 1: Rough gain ───────────────────────────────────────────────────
     print("\n── Phase 1: Rough global gain (even / odd columns) ──")
     rough_cal = RoughGainCalibrator(
+        kalpha_adu  = kalpha_adu,
         target_ev   = target_ev,
-        window_frac = window_frac,
+        window_frac = kalpha_window,
         n_bins      = 100,
         min_events  = int(gc["rough_min_events"]),
     )
@@ -626,8 +1093,7 @@ def run(cfg: Config) -> dict:
     # Quick sanity check: singles Kα peak after full calibration
     s_mask = events["grade"] == 0
     if s_mask.sum() > 50:
-        from ..lib.calibration import fit_peak as _fp
-        chk = _fp(energy_ev[s_mask], nominal=target_ev,
+        chk = fit_peak(energy_ev[s_mask], nominal=target_ev,
                   window_frac=0.10, n_bins=80, min_events=30)
         if chk.success:
             print(f"\n  ✓ Final singles Kα peak: {chk.peak_ev:.1f} eV  "
@@ -665,11 +1131,18 @@ def run(cfg: Config) -> dict:
     # ── Diagnostic plots ──────────────────────────────────────────────────────
     if gen.get("save_frame_plots", True) and gc.get("save_plots", True):
         print("\nGenerating calibration diagnostic plots …")
-        _plot_rough_gain(rough, events, out_dir, target_ev)
+        _plot_rough_gain(rough, events, out_dir, target_ev, kalpha_adu, kalpha_window)
         _plot_cti(cti_result, out_dir)
         _plot_cti_correction_check(events, e_prelim, e_cti, cti_result, out_dir)
         _plot_column_gain(col_result, out_dir, target_ev)
         _plot_final_spectrum(events, energy_ev, out_dir, target_ev)
+        _plot_pixel_gain_map(rough, col_result, out_dir, target_ev)
+        _plot_cti_per_col(                                      
+            events, e_cti, cti_result, out_dir, target_ev,
+            n_rows=n_rows,
+            row_bin_size=int(gc["cti_row_bin_size"]),
+            min_events_per_bin=max(10, int(gc["cti_min_events"]) // 3),
+        )
 
     print(f"\n✓ Gain + CTI calibration complete.  Output: {out_dir}/")
 

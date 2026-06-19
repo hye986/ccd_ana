@@ -176,21 +176,30 @@ class RoughGainCalibrator:
     Only single-pixel events (grade 0) are used because their full charge
     is contained in one pixel, making ADU → eV conversion direct.
 
+    The fit is performed in ADU space using ``kalpha_adu`` as the nominal
+    peak position.  This value must be read from the source_ana spectrum
+    (the Kα peak in adu_sum for single-pixel events) and supplied
+    explicitly — it cannot be inferred automatically because the gain
+    (eV/ADU) is precisely what we are trying to measure.
+
     Parameters
     ----------
+    kalpha_adu  : expected Kα peak position in ADU  ← READ FROM source_ana PLOT
     target_ev   : reference peak energy in eV (default Mn Kα = 5895 eV)
-    window_frac : Gaussian fit window half-width as fraction of target_ev
-    n_bins      : histogram bins for the fit
-    min_events  : minimum events per parity pool required
+    window_frac : fit window half-width as fraction of kalpha_adu
+    n_bins      : histogram bins for the Gaussian fit
+    min_events  : minimum events per parity pool
     """
 
     def __init__(self,
+                 kalpha_adu:  float,
                  target_ev:   float = MN_KALPHA_EV,
                  window_frac: float = 0.20,
                  n_bins:      int   = 100,
                  min_events:  int   = 100):
-        self.target_ev   = target_ev
-        self.window_frac = window_frac
+        self.kalpha_adu  = float(kalpha_adu)
+        self.target_ev   = float(target_ev)
+        self.window_frac = float(window_frac)
         self.n_bins      = n_bins
         self.min_events  = min_events
 
@@ -204,48 +213,54 @@ class RoughGainCalibrator:
         -------
         RoughGainResult
         """
-        singles = events[np.isin(events["grade"], list(SINGLE_GRADES))]
+        singles   = events[np.isin(events["grade"], list(SINGLE_GRADES))]
         n_singles = len(singles)
 
-        # Split by column parity
+        if n_singles == 0:
+            raise RuntimeError(
+                "No single-pixel events (grade 0) found. "
+                "Cannot perform rough gain calibration.")
+
+        # Split by column parity (seed pixel X coordinate)
         even_mask = (singles["X"] % 2) == 0
-        adu_even = singles["adu_sum"][even_mask]
-        adu_odd  = singles["adu_sum"][~even_mask]
+        adu_even  = singles["adu_sum"][even_mask]
+        adu_odd   = singles["adu_sum"][~even_mask]
 
-        # Fit peaks in ADU space; gain = target_ev / peak_adu
-        fit_even = fit_peak(adu_even, nominal=self.target_ev / 1.0,
-                            window_frac=self.window_frac,
-                            n_bins=self.n_bins,
-                            min_events=self.min_events)
-        # nominal in ADU unknown until we fit, but window_frac is wide enough
-        # For first pass: use adu_sum median as rough nominal if fit fails
-        if not fit_even.success:
-            med = float(np.median(adu_even)) if len(adu_even) else 1000.0
-            fit_even = fit_peak(adu_even, nominal=med,
-                                window_frac=self.window_frac,
-                                n_bins=self.n_bins,
-                                min_events=self.min_events)
+        print(f"  Single events: {n_singles:,}  "
+              f"(even cols: {even_mask.sum():,}, odd cols: {(~even_mask).sum():,})")
+        print(f"  Fitting around kalpha_adu={self.kalpha_adu:.0f} ADU  "
+              f"window=±{self.window_frac:.0%}")
 
-        fit_odd = fit_peak(adu_odd, nominal=self.target_ev / 1.0,
-                           window_frac=self.window_frac,
-                           n_bins=self.n_bins,
-                           min_events=self.min_events)
-        if not fit_odd.success:
-            med = float(np.median(adu_odd)) if len(adu_odd) else 1000.0
-            fit_odd = fit_peak(adu_odd, nominal=med,
-                               window_frac=self.window_frac,
-                               n_bins=self.n_bins,
-                               min_events=self.min_events)
+        # Fit in ADU space — nominal is kalpha_adu, NOT target_ev
+        fit_even = fit_peak(adu_even,
+                            nominal     = self.kalpha_adu,
+                            window_frac = self.window_frac,
+                            n_bins      = self.n_bins,
+                            min_events  = self.min_events)
 
+        fit_odd  = fit_peak(adu_odd,
+                            nominal     = self.kalpha_adu,
+                            window_frac = self.window_frac,
+                            n_bins      = self.n_bins,
+                            min_events  = self.min_events)
+
+        # Gain = eV / ADU
         g_even = (self.target_ev / fit_even.peak_ev
                   if fit_even.success and fit_even.peak_ev > 0 else np.nan)
         g_odd  = (self.target_ev / fit_odd.peak_ev
-                  if fit_odd.success and fit_odd.peak_ev > 0 else np.nan)
+                  if fit_odd.success  and fit_odd.peak_ev  > 0 else np.nan)
 
-        if np.isnan(g_even) or np.isnan(g_odd):
+        if not fit_even.success:
             warnings.warn(
-                "Rough gain fit failed for one or both parities. "
-                f"even: {fit_even.message}  odd: {fit_odd.message}",
+                f"Rough gain fit FAILED for even columns: {fit_even.message}\n"
+                f"  Check kalpha_adu ({self.kalpha_adu:.0f}) and "
+                f"kalpha_adu_window ({self.window_frac:.0%}) in config.",
+                RuntimeWarning, stacklevel=2)
+        if not fit_odd.success:
+            warnings.warn(
+                f"Rough gain fit FAILED for odd columns: {fit_odd.message}\n"
+                f"  Check kalpha_adu ({self.kalpha_adu:.0f}) and "
+                f"kalpha_adu_window ({self.window_frac:.0%}) in config.",
                 RuntimeWarning, stacklevel=2)
 
         return RoughGainResult(g_even=g_even, g_odd=g_odd,
