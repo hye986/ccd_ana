@@ -282,7 +282,7 @@ def run(cfg: Config) -> dict:
 
     # ── Build bad-pixel mask from calibration ─────────────────────────────────
     bad_pixel_mask = _build_bad_pixel_mask(cal, noise_map=noise_map, search_mask=active_mask,
-                                            user_cfg=sc.get("bad_pixel_mask"))
+                                            user_cfg=ec.get("bad_pixel_mask"))
     if bad_pixel_mask is not None and bool(bad_pixel_mask.any()):
         np.save(out_dir / "bad_pixel_mask.npy", bad_pixel_mask)
 
