@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "pnccd_ana"
+version = "0.1.0"
+description = "Offline analysis pipeline for pnCCD Fe-55 measurements"
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "h5py>=3.7",
+    "matplotlib>=3.5",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[project.scripts]
+pnccd-template   = "pnccd_ana.cli.template:main"
+pnccd-offset     = "pnccd_ana.cli.offset:main"
+pnccd-event-rec  = "pnccd_ana.cli.event_rec:main"
+pnccd-energy-cal = "pnccd_ana.cli.energy_cal:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pnccd_ana*"]

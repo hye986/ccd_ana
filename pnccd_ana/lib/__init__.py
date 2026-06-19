@@ -16,6 +16,5 @@ from .common_mode         import (cm_correct_frame,
                                    compute_cm_noise)
 from .noise               import compute_noise, build_bad_pixel_mask
 from .pattern_recognition import (find_events, N_GRADES, GRADE_NAMES,
-                                   EVENT_DTYPE, _GRADE_DEFS,
-                                   local_max_5x5)
+                                   EVENT_DTYPE, _GRADE_DEFS)
 from .process_frames      import (correct_frame, make_worker, process_frames_mt)
