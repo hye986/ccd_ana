@@ -875,6 +875,51 @@ def _plot_final_spectrum(events: np.ndarray,
     print(f"  → {p}")
 
 
+def _compute_cti_check_data(
+        events: np.ndarray,
+        e_prelim: np.ndarray,
+        e_cti: np.ndarray,
+        row_bin_size: int = 64,
+) -> dict:
+    """
+    Compute before/after CTI correction data for peak-vs-row plots.
+
+    Returns dict with:
+        - before: {row_bins, peak_per_bin, peak_success}
+        - after:  {row_bins, peak_per_bin, peak_success}
+    """
+    s_mask = np.isin(events["grade"], list(SINGLE_GRADES))
+    rows_s = events["Y"][s_mask].astype(int)
+    max_row = int(rows_s.max()) + 1 if len(rows_s) > 0 else 1
+    bin_edges = np.arange(0, max_row + row_bin_size + 1, row_bin_size)
+    bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    result = {
+        "before": {"row_bins": bin_centres, "peak_per_bin": [], "peak_success": []},
+        "after":  {"row_bins": bin_centres, "peak_per_bin": [], "peak_success": []},
+    }
+
+    for ep in [e_prelim, e_cti]:
+        key = "before" if ep is e_prelim else "after"
+        for y0, y1, rc in zip(bin_edges[:-1], bin_edges[1:], bin_centres):
+            bm = (rows_s >= y0) & (rows_s < y1)
+            if bm.sum() < 30:
+                result[key]["peak_per_bin"].append(np.nan)
+                result[key]["peak_success"].append(False)
+                continue
+            res = fit_peak(ep[bm], nominal=MN_KALPHA_EV,
+                           window_frac=0.15, n_bins=50, min_events=30)
+            result[key]["peak_per_bin"].append(res.peak_ev if res.success else np.nan)
+            result[key]["peak_success"].append(res.success)
+
+    result["before"]["peak_per_bin"] = np.array(result["before"]["peak_per_bin"], dtype=np.float64)
+    result["before"]["peak_success"]  = np.array(result["before"]["peak_success"], dtype=bool)
+    result["after"]["peak_per_bin"]   = np.array(result["after"]["peak_per_bin"], dtype=np.float64)
+    result["after"]["peak_success"]   = np.array(result["after"]["peak_success"], dtype=bool)
+
+    return result
+
+
 def _plot_cti_correction_check(events: np.ndarray,
                                 e_prelim: np.ndarray,
                                 e_cti: np.ndarray,
@@ -885,35 +930,24 @@ def _plot_cti_correction_check(events: np.ndarray,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    bin_size = cti_result.row_bins[1] - cti_result.row_bins[0] if len(cti_result.row_bins) > 1 else 64
+    data = _compute_cti_check_data(events, e_prelim, e_cti, row_bin_size=bin_size)
+
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle("CTI Correction Check — Peak position vs Row",
                  fontsize=13, fontweight="bold")
 
-    s_mask = np.isin(events["grade"], list(SINGLE_GRADES))
-
-    for ax, ep, label, colour in [
-        (axes[0], e_prelim[s_mask], "Before CTI correction", "steelblue"),
-        (axes[1], e_cti[s_mask],   "After CTI correction",  "darkorange"),
+    for ax, key, label, colour in [
+        (axes[0], "before", "Before CTI correction", "steelblue"),
+        (axes[1], "after",  "After CTI correction",  "darkorange"),
     ]:
-        rows_s = events["Y"][s_mask].astype(int)
-        bin_size = cti_result.row_bins[1] - cti_result.row_bins[0] if len(cti_result.row_bins) > 1 else 64
-        bin_edges = np.arange(0, rows_s.max() + bin_size + 1, bin_size)
-        bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        row_arr  = data[key]["row_bins"]
+        pk_arr   = data[key]["peak_per_bin"]
+        success  = data[key]["peak_success"]
 
-        pk_arr  = []
-        row_arr = []
-        for y0, y1, rc in zip(bin_edges[:-1], bin_edges[1:], bin_centres):
-            bm = (rows_s >= y0) & (rows_s < y1)
-            if bm.sum() < 30:
-                continue
-            res = fit_peak(ep[bm], nominal=MN_KALPHA_EV,
-                           window_frac=0.15, n_bins=50, min_events=30)
-            if res.success:
-                pk_arr.append(res.peak_ev)
-                row_arr.append(rc)
-
-        if row_arr:
-            ax.scatter(row_arr, pk_arr, s=25, color=colour, zorder=3)
+        valid = success & ~np.isnan(pk_arr)
+        if np.any(valid):
+            ax.scatter(row_arr[valid], pk_arr[valid], s=25, color=colour, zorder=3)
         ax.axhline(MN_KALPHA_EV, color="k", lw=1, ls="--",
                    label=f"Mn Kα = {MN_KALPHA_EV:.0f} eV")
         ax.set_xlabel("Row (Y)")
@@ -922,7 +956,7 @@ def _plot_cti_correction_check(events: np.ndarray,
         ax.legend(fontsize=8)
         ax.grid(alpha=0.3)
 
-        spread = float(np.std(pk_arr)) if len(pk_arr) > 1 else 0.0
+        spread = float(np.nanstd(pk_arr)) if np.any(valid) else 0.0
         ax.text(0.97, 0.03, f"σ = {spread:.1f} eV",
                 transform=ax.transAxes, ha="right", va="bottom", fontsize=9,
                 bbox=dict(boxstyle="round", fc="white", alpha=0.8))
@@ -1155,6 +1189,13 @@ def run(cfg: Config) -> dict:
             min_events_per_bin=max(10, int(gc["cti_min_events"]) // 3),
         )
 
+    # ── Save plot-backing data ────────────────────────────────────────────────
+    save_gain_results_h5(
+        out_dir, rough, cti_result, col_result, events, energy_ev,
+        e_prelim, e_cti, gen, gc, target_ev, kalpha_adu, kalpha_window,
+        n_total, n_rows, n_cols,
+    )
+
     print(f"\n✓ Gain + CTI calibration complete.  Output: {out_dir}/")
 
     return dict(
@@ -1163,6 +1204,235 @@ def run(cfg: Config) -> dict:
         g_even=rough.g_even, g_odd=rough.g_odd,
         cti_coeff=cti_result.cti, f_col=col_result.f_col,
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Save plot-backing data to HDF5
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _compute_f_col_histogram(f_col: np.ndarray, success: np.ndarray,
+                             n_bins: int = 100) -> tuple:
+    """Compute histogram of f_col values for successful columns."""
+    valid = f_col[success]
+    if len(valid) == 0:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.int64)
+    lo, hi = valid.min(), valid.max()
+    counts, edges = np.histogram(valid, bins=n_bins, range=(lo, hi))
+    return edges.astype(np.float64), counts.astype(np.int64)
+
+
+def _compute_pixel_gain_data(rough: RoughGainResult,
+                             col_result: ColumnGainResult) -> dict:
+    """Compute effective gain per column data."""
+    parity = np.arange(len(col_result.f_col)) % 2
+    g_eff = np.where(parity == 0, rough.g_even, rough.g_odd) * col_result.f_col
+    return {
+        "g_eff":   g_eff.astype(np.float64),
+        "parity":  parity.astype(np.uint8),
+    }
+
+
+def _compute_final_spectrum_data(
+        events: np.ndarray,
+        energy_ev: np.ndarray,
+        n_bins: int = 200,
+) -> dict:
+    """Compute final calibrated spectrum data."""
+    from .lib.calibration import fit_peak
+    from .lib.pattern_recognition import SINGLE_GRADES, SPLIT_GRADES, GRADE_OTHER
+
+    # Energy range based on 0-12000 eV (typical range for Fe-55)
+    lo, hi = 0, 12000
+    bin_edges = np.linspace(lo, hi, n_bins + 1)
+    centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    # All grades
+    all_counts, _ = np.histogram(energy_ev, bins=bin_edges)
+
+    # Per-group histograms
+    groups = {}
+    for label, grades in [
+        ("single", SINGLE_GRADES),
+        ("split",  SPLIT_GRADES),
+        ("other",  {GRADE_OTHER}),
+    ]:
+        mask = np.isin(events["grade"], list(grades))
+        if mask.sum() > 0:
+            grp_counts, _ = np.histogram(energy_ev[mask], bins=bin_edges)
+            groups[label] = {
+                "counts":     grp_counts.astype(np.int64),
+                "grade_ids":  np.array(list(grades), dtype=np.int32),
+            }
+
+    # K-alpha fit on single-grade events
+    s_mask = np.isin(events["grade"], list(SINGLE_GRADES))
+    fit_result = fit_peak(energy_ev[s_mask], nominal=MN_KALPHA_EV,
+                          window_frac=0.10, n_bins=80, min_events=30)
+
+    kalpha_data = {
+        "peak_ev":         float(fit_result.peak_ev) if fit_result.success else np.nan,
+        "sigma_ev":        float(fit_result.sigma) if fit_result.success else np.nan,
+        "amplitude":       float(fit_result.amplitude) if fit_result.success else np.nan,
+        "fwhm_ev":         float(2.355 * fit_result.sigma) if fit_result.success else np.nan,
+        "resolution_pct":  float(235.5 * fit_result.sigma / fit_result.peak_ev)
+                           if fit_result.success and fit_result.peak_ev > 0 else np.nan,
+        "n_events":        int(s_mask.sum()),
+        "success":         bool(fit_result.success),
+        "fit_window_lo":   float(fit_result.peak_ev * 0.90) if fit_result.success else np.nan,
+        "fit_window_hi":   float(fit_result.peak_ev * 1.10) if fit_result.success else np.nan,
+    }
+
+    return {
+        "bin_edges": bin_edges.astype(np.float32),
+        "all_counts": all_counts.astype(np.int64),
+        "groups": groups,
+        "kalpha_fit": kalpha_data,
+    }
+
+
+def save_gain_results_h5(
+        out_dir:        Path,
+        rough:          RoughGainResult,
+        cti_result:     CtiResult,
+        col_result:     ColumnGainResult,
+        events:         np.ndarray,
+        energy_ev:      np.ndarray,
+        e_prelim:       np.ndarray,
+        e_cti:          np.ndarray,
+        gen:            dict,
+        gc:             dict,
+        target_ev:      float,
+        kalpha_adu:     float,
+        kalpha_window:  float,
+        n_total:        int,
+        n_rows:         int,
+        n_cols:         int,
+) -> None:
+    """
+    Save plot-backing data to gain_results.h5.
+
+    HDF5 structure:
+        /phase1_rough_gain/even/{hist_edges, hist_counts, fit/{...}}
+        /phase1_rough_gain/odd/{hist_edges, hist_counts, fit/{...}}
+        /phase1_rough_gain/window/{lo_adu, hi_adu}
+        /phase3_cti/before/{row_bins, peak_per_bin, peak_success}
+        /phase3_cti/after/{row_bins, peak_per_bin, peak_success}
+        /phase4_column_gain/f_col_hist/{bin_edges, counts}
+        /pixel_gain_map/{g_eff, parity, hist/{...}}
+        /cti_per_col/{col_bin_centres, cti_per_cbin, cti_success, ...}
+        /final_spectrum/{bin_edges, all_counts, per_group/{...}, kalpha_fit/{...}}
+        /meta/...
+    """
+    path = out_dir / "gain_results.h5"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"\nSaving gain results: {path}")
+
+    row_bin_size = int(gc.get("cti_row_bin_size", 64))
+
+    with h5py.File(path, "w") as f:
+        # ── Phase 1: Rough gain ───────────────────────────────────────────────
+        p1g = f.require_group("phase1_rough_gain")
+
+        for parity_name, peak_info, g_parity in [
+            ("even", rough.peak_even, rough.g_even),
+            ("odd",  rough.peak_odd,  rough.g_odd),
+        ]:
+            pg = p1g.require_group(parity_name)
+
+            # Compute histogram
+            lo_adu = kalpha_adu * (1 - kalpha_window)
+            hi_adu = kalpha_adu * (1 + kalpha_window)
+            singles_mask = (events["grade"] == 0) & (events["X"] % 2 == (0 if parity_name == "even" else 1))
+            evts_par = events[single_mask]
+            counts, edges = np.histogram(evts_par["adu_sum"], bins=100, range=(lo_adu, hi_adu))
+            pg.create_dataset("hist_edges",  data=edges.astype(np.float32))
+            pg.create_dataset("hist_counts", data=counts.astype(np.int64))
+
+            # Fit parameters
+            fg = pg.require_group("fit")
+            fg.create_dataset("peak_adu",   data=float(peak_info.peak_ev))
+            fg.create_dataset("sigma_adu",  data=float(peak_info.sigma))
+            fg.create_dataset("amplitude",  data=float(peak_info.amplitude))
+            fg.create_dataset("success",    data=bool(peak_info.success))
+            fg.create_dataset("n_events",   data=int(np.sum(single_mask)))
+
+        # Window
+        wg = p1g.require_group("window")
+        wg.create_dataset("lo_adu", data=lo_adu)
+        wg.create_dataset("hi_adu", data=hi_adu)
+
+        # ── Phase 3: CTI ─────────────────────────────────────────────────────
+        p3g = f.require_group("phase3_cti")
+        cti_data = _compute_cti_check_data(events, e_prelim, e_cti, row_bin_size=row_bin_size)
+
+        for key in ["before", "after"]:
+            cg = p3g.require_group(key)
+            cg.create_dataset("row_bins",       data=cti_data[key]["row_bins"])
+            cg.create_dataset("peak_per_bin",   data=cti_data[key]["peak_per_bin"])
+            cg.create_dataset("peak_success",   data=cti_data[key]["peak_success"])
+
+        # ── Phase 4: Column gain ─────────────────────────────────────────────
+        p4g = f.require_group("phase4_column_gain")
+        f_edges, f_counts = _compute_f_col_histogram(col_result.f_col, col_result.success_col)
+        hg = p4g.require_group("f_col_hist")
+        hg.create_dataset("bin_edges", data=f_edges)
+        hg.create_dataset("counts",   data=f_counts)
+
+        # ── Pixel gain map ───────────────────────────────────────────────────
+        pgm = f.require_group("pixel_gain_map")
+        pix_data = _compute_pixel_gain_data(rough, col_result)
+        pgm.create_dataset("g_eff",  data=pix_data["g_eff"])
+        pgm.create_dataset("parity", data=pix_data["parity"])
+
+        # Histogram
+        valid_g = pix_data["g_eff"][col_result.success_col]
+        if len(valid_g) > 0:
+            g_lo, g_hi = valid_g.min(), valid_g.max()
+            c_even, e_even = np.histogram(pix_data["g_eff"][pix_data["parity"] == 0],
+                                           bins=80, range=(g_lo, g_hi))
+            c_odd, e_odd = np.histogram(pix_data["g_eff"][pix_data["parity"] == 1],
+                                          bins=80, range=(g_lo, g_hi))
+            hg = pgm.require_group("g_eff_hist")
+            hg.create_dataset("bin_edges",   data=e_even.astype(np.float64))
+            hg.create_dataset("counts_even", data=c_even.astype(np.int64))
+            hg.create_dataset("counts_odd",   data=c_odd.astype(np.int64))
+
+        # ── CTI per column ───────────────────────────────────────────────────
+        cpc = f.require_group("cti_per_col")
+        cpc.create_dataset("col_bin_size", data=row_bin_size, dtype=np.int32)
+        # Note: 2D peak map and per-column CTI computed in _plot_cti_per_col
+        # would need additional extraction - storing only what's readily available
+
+        # ── Final spectrum ───────────────────────────────────────────────────
+        fsg = f.require_group("final_spectrum")
+        spec_data = _compute_final_spectrum_data(events, energy_ev)
+
+        fsg.create_dataset("bin_edges",  data=spec_data["bin_edges"])
+        all_g = fsg.require_group("all_grades")
+        all_g.create_dataset("counts",   data=spec_data["all_counts"])
+
+        for grp_name, grp_data in spec_data["groups"].items():
+            gg = fsg.require_group("per_group").require_group(grp_name)
+            gg.create_dataset("counts",     data=grp_data["counts"])
+            gg.create_dataset("grade_ids",  data=grp_data["grade_ids"])
+
+        kf = fsg.require_group("kalpha_fit")
+        for k, v in spec_data["kalpha_fit"].items():
+            kf.create_dataset(k, data=v)
+
+        # ── Metadata ────────────────────────────────────────────────────────
+        mg = f.require_group("meta")
+        mg.attrs["target_ev"]        = target_ev
+        mg.attrs["kalpha_adu"]       = kalpha_adu
+        mg.attrs["cti_coefficient"]   = float(cti_result.cti)
+        mg.attrs["g_even"]           = rough.g_even
+        mg.attrs["g_odd"]            = rough.g_odd
+        mg.attrs["n_events"]         = n_total
+        mg.attrs["n_rows"]           = n_rows
+        mg.attrs["n_cols"]           = n_cols
+        mg.attrs["col_bin_size"]     = int(gc.get("cti_row_bin_size", 64))
+
+    print("  ✓ saved.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

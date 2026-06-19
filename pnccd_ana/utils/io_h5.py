@@ -600,3 +600,232 @@ def load_calibration_npy(
             f"No calibration data loaded from {npy_dir}.\n"
             f"Run dark_frame_ana first.")
     return cal
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Results HDF5 load functions
+# ──────────────────────────────────────────────────────────────────────────────
+
+def load_dark_results_h5(path: str | Path) -> dict:
+    """
+    Load plot-backing data from dark_results.h5.
+
+    Returns dict with keys: offsets, noise, bad_pixels, meta.
+    Each contains nested arrays/dicts matching the HDF5 structure.
+    """
+    path = Path(path)
+    out: dict = {}
+    with h5py.File(path, "r") as f:
+        # Offsets
+        offsets: dict = {}
+        for method in ["median", "sigmaclip", "diff"]:
+            if method in f["offsets"]:
+                g = f[f"offsets/{method}"]
+                offsets[method] = {
+                    "map":          g["map"][:],
+                    "hist_edges":   g["hist_edges"][:],
+                    "hist_counts":  g["hist_counts"][:],
+                }
+        out["offsets"] = offsets
+
+        # Noise
+        ng = f["noise"]
+        out["noise"] = {
+            "map":          ng["map"][:],
+            "hist_edges":   ng["hist_edges"][:],
+            "hist_counts":  ng["hist_counts"][:],
+        }
+        if "cm_noise" in ng:
+            cm: dict = {}
+            for name in ng["cm_noise"]:
+                cm[name] = ng[f"cm_noise/{name}"][:]
+            out["noise"]["cm_noise"] = cm
+        if "n_clipped/map" in ng:
+            out["noise"]["n_clipped_map"] = ng["n_clipped/map"][:]
+
+        # Bad pixels
+        if "bad_pixels" in f:
+            bg = f["bad_pixels"]
+            out["bad_pixels"] = {
+                "mask":              bg["mask"][:],
+                "noise_hist_edges":  bg["noise_hist_edges"][:],
+                "noise_hist_counts": bg["noise_hist_counts"][:],
+                "thresholds": {
+                    "median_noise":   float(bg["thresholds/median_noise"][()]),
+                    "hot_threshold":  float(bg["thresholds/hot_threshold"][()]),
+                    "cold_threshold": float(bg["thresholds/cold_threshold"][()]),
+                },
+            }
+            if "per_asic/n_bad" in bg:
+                out["bad_pixels"]["per_asic"] = {
+                    "n_bad":       bg["per_asic/n_bad"][:],
+                    "asic_labels": [l.decode() for l in bg["per_asic/asic_labels"][:]],
+                }
+            if "category_map" in bg:
+                out["bad_pixels"]["category_map"] = bg["category_map"][:]
+
+        # Metadata
+        if "meta" in f:
+            out["meta"] = dict(f["meta"].attrs)
+
+    print(f"  Loaded dark results from {path}")
+    return out
+
+
+def load_source_results_h5(path: str | Path) -> dict:
+    """
+    Load plot-backing data from source_results.h5.
+
+    Returns dict with keys: raw_spectrum, grade_distribution, meta.
+    """
+    path = Path(path)
+    out: dict = {}
+    with h5py.File(path, "r") as f:
+        # Raw spectrum
+        if "raw_spectrum" in f:
+            rg = f["raw_spectrum"]
+            out["raw_spectrum"] = {
+                "bin_edges":          rg["bin_edges"][:],
+                "all_pixels":        rg["all_pixels"][:],
+                "positive_pixels":    rg["positive_pixels"][:],
+                "above_seed":         rg["above_seed"][:],
+                "seed_threshold_adu": float(rg["seed_threshold_adu"][()]),
+                "seed_sigma":         float(rg["seed_sigma"][()]),
+                "median_noise_adu":   float(rg["median_noise_adu"][()]),
+            }
+
+        # Grade distribution
+        if "grade_distribution" in f:
+            gg = f["grade_distribution"]
+            out["grade_distribution"] = {
+                "grades":      gg["grades"][:],
+                "counts":      gg["counts"][:],
+                "grade_names": [n.decode() for n in gg["grade_names"][:]],
+            }
+
+        # Metadata
+        if "meta" in f:
+            out["meta"] = dict(f["meta"].attrs)
+
+    print(f"  Loaded source results from {path}")
+    return out
+
+
+def load_gain_results_h5(path: str | Path) -> dict:
+    """
+    Load plot-backing data from gain_results.h5.
+
+    Returns dict with keys: phase1_rough_gain, phase3_cti, phase4_column_gain,
+    pixel_gain_map, cti_per_col, final_spectrum, meta.
+    """
+    path = Path(path)
+    out: dict = {}
+    with h5py.File(path, "r") as f:
+        # Phase 1: Rough gain
+        if "phase1_rough_gain" in f:
+            p1: dict = {}
+            for parity in ["even", "odd"]:
+                if parity in f["phase1_rough_gain"]:
+                    pg = f[f"phase1_rough_gain/{parity}"]
+                    p1[parity] = {
+                        "hist_edges":  pg["hist_edges"][:],
+                        "hist_counts": pg["hist_counts"][:],
+                        "fit": {
+                            "peak_adu":   float(pg["fit/peak_adu"][()]),
+                            "sigma_adu":  float(pg["fit/sigma_adu"][()]),
+                            "amplitude":  float(pg["fit/amplitude"][()]),
+                            "success":    bool(pg["fit/success"][()]),
+                            "n_events":   int(pg["fit/n_events"][()]),
+                        },
+                    }
+            if "window" in f["phase1_rough_gain"]:
+                p1["window"] = {
+                    "lo_adu": float(f["phase1_rough_gain/window/lo_adu"][()]),
+                    "hi_adu": float(f["phase1_rough_gain/window/hi_adu"][()]),
+                }
+            out["phase1_rough_gain"] = p1
+
+        # Phase 3: CTI
+        if "phase3_cti" in f:
+            p3: dict = {}
+            for key in ["before", "after"]:
+                if key in f["phase3_cti"]:
+                    cg = f[f"phase3_cti/{key}"]
+                    p3[key] = {
+                        "row_bins":      cg["row_bins"][:],
+                        "peak_per_bin":  cg["peak_per_bin"][:],
+                        "peak_success":  cg["peak_success"][:],
+                    }
+            out["phase3_cti"] = p3
+
+        # Phase 4: Column gain
+        if "phase4_column_gain" in f:
+            p4: dict = {}
+            if "f_col_hist/bin_edges" in f["phase4_column_gain"]:
+                hg = f["phase4_column_gain/f_col_hist"]
+                p4["f_col_hist"] = {
+                    "bin_edges": hg["bin_edges"][:],
+                    "counts":    hg["counts"][:],
+                }
+            out["phase4_column_gain"] = p4
+
+        # Pixel gain map
+        if "pixel_gain_map" in f:
+            pgm = f["pixel_gain_map"]
+            out["pixel_gain_map"] = {
+                "g_eff":  pgm["g_eff"][:],
+                "parity": pgm["parity"][:],
+            }
+            if "g_eff_hist/bin_edges" in pgm:
+                hg = pgm["g_eff_hist"]
+                out["pixel_gain_map"]["g_eff_hist"] = {
+                    "bin_edges":   hg["bin_edges"][:],
+                    "counts_even": hg["counts_even"][:],
+                    "counts_odd":  hg["counts_odd"][:],
+                }
+
+        # CTI per column
+        if "cti_per_col" in f:
+            cpc = f["cti_per_col"]
+            out["cti_per_col"] = {
+                "col_bin_size": int(cpc["col_bin_size"][()]),
+            }
+
+        # Final spectrum
+        if "final_spectrum" in f:
+            fsg = f["final_spectrum"]
+            fs: dict = {
+                "bin_edges": fsg["bin_edges"][:],
+            }
+            if "all_grades/counts" in fsg:
+                fs["all_grades"] = {"counts": fsg["all_grades/counts"][:]}
+            if "per_group" in fsg:
+                groups: dict = {}
+                for grp_name in fsg["per_group"]:
+                    gg = fsg[f"per_group/{grp_name}"]
+                    groups[grp_name] = {
+                        "counts":    gg["counts"][:],
+                        "grade_ids": gg["grade_ids"][:],
+                    }
+                fs["per_group"] = groups
+            if "kalpha_fit/peak_ev" in fsg:
+                kf = fsg["kalpha_fit"]
+                fs["kalpha_fit"] = {
+                    "peak_ev":         float(kf["peak_ev"][()]),
+                    "sigma_ev":        float(kf["sigma_ev"][()]),
+                    "amplitude":       float(kf["amplitude"][()]),
+                    "fwhm_ev":         float(kf["fwhm_ev"][()]),
+                    "resolution_pct":  float(kf["resolution_pct"][()]),
+                    "n_events":        int(kf["n_events"][()]),
+                    "success":         bool(kf["success"][()]),
+                    "fit_window_lo":   float(kf["fit_window_lo"][()]),
+                    "fit_window_hi":   float(kf["fit_window_hi"][()]),
+                }
+            out["final_spectrum"] = fs
+
+        # Metadata
+        if "meta" in f:
+            out["meta"] = dict(f["meta"].attrs)
+
+    print(f"  Loaded gain results from {path}")
+    return out

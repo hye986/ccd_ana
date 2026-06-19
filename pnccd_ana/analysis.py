@@ -224,6 +224,13 @@ from .cli.calibration import run as run_gain_calibration
 from .cli.calibration import load_gain_cal_h5, save_gain_cal_h5
 from .lib.calibration import apply_full_calibration, MN_KALPHA_EV
 
+# ── Results loaders ──────────────────────────────────────────────────────────────
+from .utils.io_h5 import (
+    load_dark_results_h5,
+    load_source_results_h5,
+    load_gain_results_h5,
+)
+
 def load_calibration(path:  str | Path,
                      asics: list[str] | None = None,
                     ) -> dict:
@@ -341,3 +348,98 @@ def process_frames(raw_frames:     np.ndarray,
     if not all_evts:
         return np.empty(0, dtype=EVENT_DTYPE)
     return np.concatenate(all_evts)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Results HDF5 loaders — reload plot-backing data for redrawing / refitting
+# ──────────────────────────────────────────────────────────────────────────────
+
+def load_dark_results(path: str | Path) -> dict:
+    """
+    Load plot-backing data from dark_results.h5.
+
+    Use this to reload data for replotting or refitting without rerunning
+    the dark frame calibration pipeline.
+
+    Parameters
+    ----------
+    path : path to dark_results.h5
+
+    Returns
+    -------
+    dict with keys: offsets, noise, bad_pixels, meta.
+    Each contains nested arrays/dicts matching the HDF5 structure.
+
+    Example
+    -------
+    >>> from pnccd_ana.analysis import load_dark_results
+    >>> dark = load_dark_results("run0001/dark_results.h5")
+    >>> offsets = dark["offsets"]
+    >>> noise_map = dark["noise"]["map"]
+    >>> hist_edges = dark["noise"]["hist_edges"]
+    >>> hist_counts = dark["noise"]["hist_counts"]
+    """
+    from .utils.io_h5 import load_dark_results_h5 as _load
+    return _load(path)
+
+
+def load_source_results(path: str | Path) -> dict:
+    """
+    Load plot-backing data from source_results.h5.
+
+    Use this to reload data for replotting or refitting without rerunning
+    the source analysis pipeline.
+
+    Parameters
+    ----------
+    path : path to source_results.h5
+
+    Returns
+    -------
+    dict with keys: raw_spectrum, grade_distribution, meta.
+
+    Example
+    -------
+    >>> from pnccd_ana.analysis import load_source_results
+    >>> src = load_source_results("run0001/source_results.h5")
+    >>> raw = src["raw_spectrum"]
+    >>> bin_edges = raw["bin_edges"]
+    >>> counts = raw["all_pixels"]
+    >>> grades = src["grade_distribution"]["grades"]
+    >>> grade_counts = src["grade_distribution"]["counts"]
+    """
+    from .utils.io_h5 import load_source_results_h5 as _load
+    return _load(path)
+
+
+def load_gain_results(path: str | Path) -> dict:
+    """
+    Load plot-backing data from gain_results.h5.
+
+    Use this to reload data for replotting or refitting without rerunning
+    the gain calibration pipeline.
+
+    Parameters
+    ----------
+    path : path to gain_results.h5
+
+    Returns
+    -------
+    dict with keys: phase1_rough_gain, phase3_cti, phase4_column_gain,
+    pixel_gain_map, cti_per_col, final_spectrum, meta.
+
+    Example
+    -------
+    >>> from pnccd_ana.analysis import load_gain_results
+    >>> gain = load_gain_results("run0001/gain_results.h5")
+    >>> rough = gain["phase1_rough_gain"]
+    >>> cti = gain["phase3_cti"]
+    >>> col = gain["phase4_column_gain"]
+    >>> final = gain["final_spectrum"]
+    >>> kalpha = final["kalpha_fit"]
+    >>> print(f"K-alpha peak: {kalpha['peak_ev']:.1f} eV")
+    >>> print(f"FWHM: {kalpha['fwhm_ev']:.1f} eV")
+    >>> print(f"Resolution: {kalpha['resolution_pct']:.2f}%")
+    """
+    from .utils.io_h5 import load_gain_results_h5 as _load
+    return _load(path)

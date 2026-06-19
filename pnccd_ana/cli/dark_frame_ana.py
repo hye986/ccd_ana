@@ -15,6 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import h5py
 import numpy as np
 
 from ..config import Config
@@ -262,8 +263,159 @@ def run(cfg: Config) -> dict:
     if dc["save_npy"]:
         save_calibration_npy(out_dir, save_payload)
 
+    # Save plot-backing data
+    save_dark_results_h5(out_dir, all_results, active_mask, gen, n_sigma,
+                         total_frames_loaded, methods, n_asics)
+
     print(f"\n✓ Dark-frame calibration complete.  Output: {out_dir}/")
     return all_results
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Save plot-backing data to HDF5
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_dark_results_h5(
+        out_dir:    Path,
+        results:    dict,
+        active_mask: np.ndarray,
+        gen:       dict,
+        n_sigma:   float,
+        n_frames:  int,
+        methods:   list[str],
+        n_asics:   int,
+) -> None:
+    """
+    Save plot-backing data to dark_results.h5.
+
+    HDF5 structure:
+        /offsets/median/{map, hist_edges, hist_counts}
+        /offsets/sigmaclip/{map, hist_edges, hist_counts}
+        /offsets/diff/{map, hist_edges, hist_counts}  (if both methods run)
+        /noise/{map, hist_edges, hist_counts}
+        /noise/cm_noise/{asic_name}  (one per ASIC)
+        /noise/n_clipped/{map}
+        /bad_pixels/{mask, category_map, noise_hist_edges, noise_hist_counts,
+                     thresholds/{median_noise, hot_threshold, cold_threshold},
+                     per_asic/{n_bad, asic_labels}}
+        /meta/...
+    """
+    path = out_dir / "dark_results.h5"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"\nSaving dark results: {path}")
+
+    r = results.get("global", {})
+
+    def _compute_hist(arr: np.ndarray, n_bins: int = 200) -> tuple:
+        """Compute histogram from array, excluding masked regions."""
+        flat = arr.ravel()
+        if np.any(np.isnan(flat)):
+            flat = flat[~np.isnan(flat)]
+        lo, hi = np.percentile(flat, [0.5, 99.5]) if len(flat) > 0 else (0, 1)
+        counts, edges = np.histogram(flat, bins=n_bins, range=(lo, hi))
+        return edges.astype(np.float32), counts.astype(np.int64)
+
+    with h5py.File(path, "w") as f:
+        # ── Offsets ────────────────────────────────────────────────────────────
+        og = f.require_group("offsets")
+        for method in methods:
+            key = f"offset_{method}"
+            if key not in r:
+                continue
+            arr = r[key].astype(np.float32)
+            mg = og.require_group(method)
+            mg.create_dataset("map", data=arr, compression="gzip")
+
+            # Apply mask for histogram
+            masked = np.where(active_mask, arr, np.nan)
+            edges, counts = _compute_hist(masked)
+            mg.create_dataset("hist_edges",  data=edges)
+            mg.create_dataset("hist_counts", data=counts)
+
+        # Difference map if both methods exist
+        if "offset_median" in r and "offset_sigclip" in r:
+            diff = (r["offset_median"] - r["offset_sigclip"]).astype(np.float32)
+            masked_diff = np.where(active_mask, diff, np.nan)
+            dg = og.require_group("diff")
+            dg.create_dataset("map", data=diff, compression="gzip")
+            edges, counts = _compute_hist(masked_diff)
+            dg.create_dataset("hist_edges",  data=edges)
+            dg.create_dataset("hist_counts", data=counts)
+
+        # ── Noise ──────────────────────────────────────────────────────────────
+        ng = f.require_group("noise")
+        noise = r["noise"].astype(np.float32)
+        masked_noise = np.where(active_mask, noise, np.nan)
+        ng.create_dataset("map", data=noise, compression="gzip")
+        edges, counts = _compute_hist(masked_noise)
+        ng.create_dataset("hist_edges",  data=edges)
+        ng.create_dataset("hist_counts", data=counts)
+
+        # CM noise per ASIC
+        cm_noise = r.get("cm_noise")
+        if cm_noise is not None:
+            cmg = ng.require_group("cm_noise")
+            if isinstance(cm_noise, dict):
+                for name, vals in cm_noise.items():
+                    cmg.create_dataset(name, data=vals.astype(np.float32))
+            else:
+                cmg.create_dataset("global", data=np.asarray(cm_noise).astype(np.float32))
+
+        # n_clipped map
+        n_clipped = r.get("n_clipped_map")
+        if n_clipped is not None:
+            cg = ng.require_group("n_clipped")
+            cg.create_dataset("map", data=n_clipped.astype(np.float32), compression="gzip")
+
+        # ── Bad pixels ────────────────────────────────────────────────────────
+        bp = f.require_group("bad_pixels")
+        bp_mask = r.get("bad_pixel_mask")
+        if bp_mask is not None:
+            bp.create_dataset("mask", data=bp_mask)
+
+            # Category map (if available from bad pixel mask)
+            if hasattr(bp_mask, "category_map"):
+                bp.create_dataset("category_map", data=bp_mask.category_map)
+
+            # Noise histogram for threshold plot
+            masked_noise = np.where(active_mask, noise, np.nan)
+            edges, counts = _compute_hist(masked_noise)
+            bp.create_dataset("noise_hist_edges",  data=edges)
+            bp.create_dataset("noise_hist_counts", data=counts)
+
+            # Thresholds
+            tg = bp.require_group("thresholds")
+            med_noise = float(np.nanmedian(masked_noise))
+            hot_thr = med_noise * gen.get("bad_pixel_mask", {}).get("hot_rms_multiple", 5.0)
+            cold_thr = med_noise * gen.get("bad_pixel_mask", {}).get("cold_rms_fraction", 0.1)
+            tg.create_dataset("median_noise",  data=med_noise)
+            tg.create_dataset("hot_threshold",  data=hot_thr)
+            tg.create_dataset("cold_threshold", data=cold_thr)
+
+            # Per-ASIC bad pixel counts
+            if ASIC_WIDTH > 0:
+                n_cols = int(noise.shape[1])
+                asic_width = n_cols // n_asics if n_asics > 0 else ASIC_WIDTH
+                asic_labels = [f"C{i}" for i in range(n_asics)]
+                n_bad = []
+                for i in range(n_asics):
+                    x0 = i * asic_width
+                    x1 = x0 + asic_width
+                    n_bad.append(int(bp_mask[x0:x1].any(axis=(0, 1)).sum()
+                                   if bp_mask.ndim == 2 else bp_mask[x0:x1].sum()))
+                ag = bp.require_group("per_asic")
+                ag.create_dataset("asic_labels", data=[l.encode() for l in asic_labels])
+                ag.create_dataset("n_bad", data=np.array(n_bad, dtype=np.int32))
+
+        # ── Metadata ──────────────────────────────────────────────────────────
+        mg = f.require_group("meta")
+        mg.attrs["n_dark_frames"] = n_frames
+        mg.attrs["sigma_clip_nsigma"] = n_sigma
+        mg.attrs["methods"] = ",".join(methods)
+        mg.attrs["n_asics"] = n_asics
+        mg.attrs["asic_width"] = ASIC_WIDTH
+
+    print("  ✓ saved.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
