@@ -21,6 +21,17 @@ import sys
 sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 from pnccd_ana.lib.pattern_recognition import write_grade_table_header
 write_grade_table_header()
+
+from pathlib import Path
+h_path = Path("pnccd_ana/lib/_grade_table_generated.h")
+c_path = Path("pnccd_ana/lib/_pattern_recognition_c.c")
+
+# If .h is newer than .c, touch .c to force recompilation
+if h_path.exists() and c_path.exists():
+    if h_path.stat().st_mtime > c_path.stat().st_mtime:
+        print("[setup_ext] Touching .c file to force recompile (header is newer)")
+        c_path.touch()
+
 print("[setup_ext] Regenerated _grade_table_generated.h")
 
 ext = Extension(
