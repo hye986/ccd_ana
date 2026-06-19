@@ -395,15 +395,15 @@ def run(cfg: Config) -> dict:
                   "adu_sum > adu_seed")
 
         # Check if bin range covers the peaks
-        in_range = int(((events["adu_sum"] >= sc["adu_min"]) &
-                        (events["adu_sum"] <= sc["adu_max"])).sum())
+        in_range = int(((events["adu_sum"] >= ec["adu_min"]) &
+                        (events["adu_sum"] <= ec["adu_max"])).sum())
         if in_range < len(events) * 0.5:
             print(f"  ⚠  Only {in_range}/{len(events)} events within "
-                  f"adu_min={sc['adu_min']:.0f}..adu_max={sc['adu_max']:.0f}")
+                  f"adu_min={ec['adu_min']:.0f}..adu_max={ec['adu_max']:.0f}")
             print(f"     Plots will auto-range but UPDATE adu_min/adu_max in config.")
 
     # ── Spectrum histograms ───────────────────────────────────────────────────
-    bin_edges = np.linspace(sc["adu_min"], sc["adu_max"], sc["n_bins"] + 1)
+    bin_edges = np.linspace(ec["adu_min"], ec["adu_max"], ec["n_bins"] + 1)
     from ..lib.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
     spectra: dict[int, np.ndarray] = {}
     all_grade_ids = [gid for gid, _, _ in _GRADE_DEFS] + [GRADE_OTHER]
@@ -411,7 +411,7 @@ def run(cfg: Config) -> dict:
         m = events["grade"] == g
         spectra[g], _ = (np.histogram(events["adu_sum"][m], bins=bin_edges)
                          if m.any() else
-                         (np.zeros(sc["n_bins"], dtype=np.int64), bin_edges))
+                         (np.zeros(ec["n_bins"], dtype=np.int64), bin_edges))
 
     # ── 2-D maps ──────────────────────────────────────────────────────────────
     hit_count = np.zeros((H, W), dtype=np.int32)
