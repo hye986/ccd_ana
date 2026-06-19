@@ -427,9 +427,10 @@ def run(cfg: Config) -> dict:
                             hit_adu / hit_count, np.nan).astype(np.float32)
 
     # ── Save ──────────────────────────────────────────────────────────────────
-    if events_h5_path:
-        # Resolve output path relative to output_dir
-        events_path = cfg.resolve_output_path(events_h5_path)
+    # Resolve events path from config, default to output_dir/events.h5
+    save_events_cfg = ec.get("save_events", "events.h5")
+    if save_events_cfg:
+        events_path = cfg.resolve_output_path(save_events_cfg)
         if events_path is None:
             events_path = cfg.events_path()
         save_events_h5(
