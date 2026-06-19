@@ -1,12 +1,12 @@
 """
-pnccd_ana.cli.dark_frame_ana
-=============================
-Command-line entry point for dark-frame calibration.
+pnccd_ana.cli.offset
+=====================
+Command-line entry point for offset calibration.
 
 Usage
 -----
-  python -m pnccd_ana.cli.dark_frame_ana analysis.yaml
-  python -m pnccd_ana.cli.dark_frame_ana analysis.yaml --section dark_frames
+  python -m pnccd_ana.cli.offset analysis.yaml
+  python -m pnccd_ana.cli.offset analysis.yaml --section offset
 """
 
 from __future__ import annotations
@@ -154,25 +154,25 @@ def _resolve_paths(file_spec) -> list[Path]:
 
 def run(cfg: Config) -> dict:
     """
-    Execute the dark-frame calibration pipeline from a Config object.
+    Execute the offset calibration pipeline from a Config object.
 
     Returns a results dict (useful when called programmatically).
     """
-    dc       = cfg.dark_frames
+    oc       = cfg.offset
     gen      = cfg.general
     out_dir  = cfg.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
 
-    dark_run_file = dc["dark_run_file"]
+    dark_run_file = oc["dark_run_file"]
     if not dark_run_file:
-        raise ValueError("[dark_frames] dark_run_file must be set in config.")
+        raise ValueError("[offset] dark_run_file must be set in config.")
 
     # Resolve input path relative to data_dir
     dark_run_path = cfg.resolve_input_path(dark_run_file)
 
-    methods  = cfg.methods_for_dark()
-    n_sigma  = float(dc["sigma_clip_nsigma"])
+    methods  = cfg.methods_for_offset()
+    n_sigma  = float(oc["sigma_clip_nsigma"])
 
     # ── Resolve file list (single path, glob, or list) ────────────────────────
     run_files = _resolve_paths(dark_run_path)
@@ -251,23 +251,23 @@ def run(cfg: Config) -> dict:
 
     save_payload = {"global": _strip(all_results["global"])}
 
-    if dc["save_h5"]:
+    if oc["save_h5"]:
         save_calibration_h5(
-            out_dir / "dark_calibration.h5",
+            out_dir / "offset.h5",
             save_payload,
             n_sigma=n_sigma,
             n_frames=total_frames_loaded,
             methods=methods,
             metadata=gen.get("metadata", {}),
         )
-    if dc["save_npy"]:
+    if oc["save_npy"]:
         save_calibration_npy(out_dir, save_payload)
 
     # Save plot-backing data
-    save_dark_results_h5(out_dir, all_results, active_mask, gen, n_sigma,
-                         total_frames_loaded, methods, n_asics)
+    save_offset_results_h5(out_dir, all_results, active_mask, gen, n_sigma,
+                           total_frames_loaded, methods, n_asics)
 
-    print(f"\n✓ Dark-frame calibration complete.  Output: {out_dir}/")
+    print(f"\n✓ Offset calibration complete.  Output: {out_dir}/")
     return all_results
 
 
@@ -275,7 +275,7 @@ def run(cfg: Config) -> dict:
 # Save plot-backing data to HDF5
 # ──────────────────────────────────────────────────────────────────────────────
 
-def save_dark_results_h5(
+def save_offset_results_h5(
         out_dir:    Path,
         results:    dict,
         active_mask: np.ndarray,
@@ -286,7 +286,7 @@ def save_dark_results_h5(
         n_asics:   int,
 ) -> None:
     """
-    Save plot-backing data to dark_results.h5.
+    Save plot-backing data to offset_results.h5.
 
     HDF5 structure:
         /offsets/median/{map, hist_edges, hist_counts}
@@ -300,9 +300,9 @@ def save_dark_results_h5(
                      per_asic/{n_bad, asic_labels}}
         /meta/...
     """
-    path = out_dir / "dark_results.h5"
+    path = out_dir / "offset_results.h5"
     path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\nSaving dark results: {path}")
+    print(f"\nSaving offset results: {path}")
 
     r = results.get("global", {})
 

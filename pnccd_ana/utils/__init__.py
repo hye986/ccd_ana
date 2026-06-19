@@ -4,9 +4,9 @@ from .io_h5   import (get_frame_indices, make_chunks, read_chunk,
                        save_calibration_h5, load_calibration_h5,
                        save_calibration_npy, load_calibration_npy,
                        save_events_h5, load_events_h5,
-                       load_dark_results_h5,
-                       load_source_results_h5,
-                       load_gain_results_h5)
+                       load_offset_results_h5,
+                       load_event_rec_results_h5,
+                       load_energy_cal_results_h5)
 
 from .io_raw  import (get_frame_indices  as raw_get_frame_indices,
                        make_chunks        as raw_make_chunks,

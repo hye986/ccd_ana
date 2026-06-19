@@ -30,9 +30,9 @@ Config file format (YAML)
     save_npy: true
     save_h5: true
 
-  source_spectrum:
+  event_rec:
     source_run_file: source_run.raw  # relative to data_dir
-    calibration_file: dark_calibration.h5  # relative to data_dir
+    calibration_file: offset.h5  # relative to data_dir
     seed_sigma: 5.0
     split_sigma: 3.0
     noise_scope: auto
@@ -47,7 +47,7 @@ Path resolution:
   - Input paths (dark_run_file, source_run_file, calibration_file) are resolved
     relative to data_dir if not absolute
   - Output paths (save_events) are resolved relative to output_dir
-  - calibration_file defaults to {output_dir}/dark_calibration.h5 if not set
+  - calibration_file defaults to {output_dir}/offset.h5 if not set
   - save_events defaults to {output_dir}/events.h5 if not set
 
 Sections not present in the YAML are simply skipped at runtime.
@@ -75,7 +75,7 @@ _DEFAULTS: dict[str, Any] = {
     "general": {
         "output_dir":       "output",      # base output directory for results
         "data_dir":         ".",           # base input directory for data files
-        # Shared settings (used by both dark_frames and source_spectrum):
+        # Shared settings (used by offset and event_rec stages):
         "data_format":      "raw",         # raw | h5 (file format)
         "frame_rows":       None,          # number of rows per frame (auto-detected if None)
         "frame_cols":      None,          # number of columns per frame (auto-detected if None)
@@ -89,7 +89,7 @@ _DEFAULTS: dict[str, Any] = {
         "ASIC_mask":        [],             # list of masked ASIC indices to exclude (e.g., [0, 2] to skip ASICs 0 and 2)
         "metadata":         {},
     },
-    "dark_frames": {
+    "offset": {
         "dark_run_file":            None,
         "pedestal_method":          "both",
         "sigma_clip_nsigma":        3.0,
@@ -97,9 +97,9 @@ _DEFAULTS: dict[str, Any] = {
         "save_npy":                 True,
         "save_h5":                  True,
     },
-    "source_spectrum": {
+    "event_rec": {
         "source_run_file":    None,
-        "calibration_file":   None,   # defaults to {output_dir}/dark_calibration.h5
+        "calibration_file":   None,   # defaults to {output_dir}/offset.h5
         "seed_sigma":         5.0,
         "split_sigma":        3.0,
         "noise_scope":        "auto",
@@ -118,7 +118,7 @@ _DEFAULTS: dict[str, Any] = {
             "n_dark_frames":     0,       # 0 → skip clip-fraction test
         },
     },
-    "gain_calibration": {
+    "energy_cal": {
         "events_file":       None,
         "output_file":       None,
         "target_ev":         5895.0,
@@ -208,8 +208,8 @@ class Config:
         return self.output_dir / p
 
     def calibration_path(self) -> Path:
-        """Default path for dark calibration file."""
-        return self.resolve_output_path("dark_calibration.h5")
+        """Default path for offset calibration file."""
+        return self.resolve_output_path("offset.h5")
 
     def events_path(self) -> Path:
         """Default path for events file."""
@@ -227,9 +227,9 @@ class Config:
             raw = raw.split()
         return resolve_asics(raw)
 
-    def methods_for_dark(self) -> list[str]:
+    def methods_for_offset(self) -> list[str]:
         """Parse pedestal_method into ['median'], ['sigclip'], or both."""
-        m = self.dark_frames.get("pedestal_method", "both").lower().strip()
+        m = self.offset.get("pedestal_method", "both").lower().strip()
         if m == "both":
             return ["median", "sigclip"]
         if m in ("median", "sigclip"):
@@ -291,7 +291,7 @@ _TEMPLATE = """\
 general:
   output_dir: output                # output directory for results
   data_dir: .                       # base input directory (paths are relative to this)
-  # Shared settings (used by both dark_frames and source_spectrum):
+  # Shared settings (used by offset and event_rec stages):
   data_format: raw                  # raw | h5 (file format)
   frame_rows: 1024                  # number of rows per frame (Y dimension)
   frame_cols: 512                   # number of columns per frame (X dimension)
@@ -308,7 +308,7 @@ general:
     sample: ""
     run_date: ""
 
-dark_frames:
+offset:
   dark_run_file: dark_run.raw       # relative to data_dir
   pedestal_method: both             # median | sigclip | both
   sigma_clip_nsigma: 3.0
@@ -316,9 +316,9 @@ dark_frames:
   save_npy: true                    # save as .npy files
   save_h5: true                     # save as .h5 file
 
-source_spectrum:
+event_rec:
   source_run_file: source_run.raw   # relative to data_dir
-  calibration_file: dark_calibration.h5  # relative to data_dir (or output_dir if not found)
+  calibration_file: offset.h5  # relative to data_dir (or output_dir if not found)
   seed_sigma: 5.0                   # threshold for finding candidate centres (3-8 × noise)
   split_sigma: 3.0                  # threshold for classifying neighbours (1-3 × noise)
   noise_scope: auto                 # auto | global | asic
@@ -335,12 +335,12 @@ source_spectrum:
     max_clip_fraction: 0.5          # frac of dark frames clipped per pixel above which it's UNSTABLE
     n_dark_frames: 0                # 0 disables the clip-fraction test (no info in the cal file)
 
-gain_calibration:
+energy_cal:
   events_file: null             # null = use {output_dir}/events.h5
-  output_file: null             # null = use {output_dir}/gain_calibration.h5
+  output_file: null             # null = use {output_dir}/energy_cal.h5
   target_ev: 5895.0             # Mn Kα reference energy [eV]
   kalpha_adu: 15000             # REQUIRED: Kα peak position in ADU
-                                # read this from your source_ana spectrum plot
+                                # read this from your event_rec spectrum plot
                                 # (the peak of single-pixel events in adu_sum)
   kalpha_adu_window: 0.20       # Phase 1 fit window ± this fraction of kalpha_adu
                                 # e.g. 0.20 → fit between 12000 and 18000 ADU

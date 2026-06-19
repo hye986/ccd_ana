@@ -1,11 +1,11 @@
 """
-pnccd_ana.cli.source_ana
-=========================
-Command-line entry point for Fe-55 source analysis.
+pnccd_ana.cli.event_rec
+========================
+Command-line entry point for event recognition.
 
 Usage
 -----
-  python -m pnccd_ana.cli.source_ana analysis.yaml
+  python -m pnccd_ana.cli.event_rec analysis.yaml
 """
 
 from __future__ import annotations
@@ -218,22 +218,22 @@ def _resolve_paths(file_spec) -> list[Path]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run(cfg: Config) -> dict:
-    """Execute the source analysis pipeline from a Config object."""
-    sc      = cfg.source_spectrum
+    """Execute the event recognition pipeline from a Config object."""
+    ec      = cfg.event_rec
     gen     = cfg.general
     out_dir = cfg.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    source_run_file = sc["source_run_file"]
-    calibration_file = sc["calibration_file"]
+    source_run_file = ec["source_run_file"]
+    calibration_file = ec["calibration_file"]
     
     # Resolve paths: input files from data_dir, output files to output_dir
     if not source_run_file:
-        raise ValueError("[source_spectrum] source_run_file must be set.")
+        raise ValueError("[event_rec] source_run_file must be set.")
     
     source_run_path = cfg.resolve_input_path(source_run_file)
     
-    # Calibration file: default to output_dir/dark_calibration.h5
+    # Calibration file: default to output_dir/offset.h5
     # If user provides a path, try data_dir first, then output_dir
     if calibration_file:
         cal_input = cfg.resolve_input_path(calibration_file)
@@ -248,12 +248,12 @@ def run(cfg: Config) -> dict:
     else:
         calibration_path = cfg.calibration_path()
 
-    asics           = cfg.asics_for("source_spectrum")
-    seed_sigma      = float(sc.get("seed_sigma",  sc.get("threshold_sigma", 5.0)))
-    split_sigma     = float(sc.get("split_sigma", 3.0))
-    reject_extra    = bool(sc.get("reject_extra", False))
-    prefer          = sc.get("prefer_offset", "sigclip")
-    noise_scope     = sc.get("noise_scope", "auto")
+    asics           = cfg.asics_for("event_rec")
+    seed_sigma      = float(ec.get("seed_sigma",  ec.get("threshold_sigma", 5.0)))
+    split_sigma     = float(ec.get("split_sigma", 3.0))
+    reject_extra    = bool(ec.get("reject_extra", False))
+    prefer          = ec.get("prefer_offset", "sigclip")
+    noise_scope     = ec.get("noise_scope", "auto")
 
     # ── Load calibration ──────────────────────────────────────────────────────
     print(f"\nLoading calibration from: {calibration_path}")
@@ -449,7 +449,7 @@ def run(cfg: Config) -> dict:
         sample_arr = np.stack(sample_buf, axis=0)
     else:
         sample_arr = None
-    save_source_results_h5(
+    save_event_rec_results_h5(
         out_dir, events, spectra, bin_edges, hit_count, mean_adu,
         sample_arr, noise_map, gen, seed_sigma, total_frames_processed,
     )
@@ -557,7 +557,7 @@ def _compute_grade_distribution(events: np.ndarray) -> dict:
     }
 
 
-def save_source_results_h5(
+def save_event_rec_results_h5(
         out_dir:        Path,
         events:         np.ndarray,
         spectra:        dict[int, np.ndarray],
@@ -571,7 +571,7 @@ def save_source_results_h5(
         n_frames:       int,
 ) -> None:
     """
-    Save plot-backing data to source_results.h5.
+    Save plot-backing data to event_rec_results.h5.
 
     HDF5 structure:
         /raw_spectrum/{bin_edges, all_pixels, positive_pixels, above_seed,
@@ -579,9 +579,9 @@ def save_source_results_h5(
         /grade_distribution/{grades, counts, grade_names}
         /meta/...
     """
-    path = out_dir / "source_results.h5"
+    path = out_dir / "event_rec_results.h5"
     path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\nSaving source results: {path}")
+    print(f"\nSaving event_rec results: {path}")
 
     with h5py.File(path, "w") as f:
         # ── Raw spectrum ───────────────────────────────────────────────────────

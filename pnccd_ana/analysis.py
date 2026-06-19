@@ -7,12 +7,12 @@ This module is the entry point for users who want to understand or script the
 analysis without reading the internals.  All analysis happens in four distinct
 stages that are executed in order:
 
-Stage 1 — Dark frame calibration
+Stage 1 — Offset calibration
 ──────────────────────────────────
 Purpose  : Measure per-pixel electronic offset and noise from dark frames
           (frames with no source illuminating the sensor).
 Inputs  : dark_run.raw   shape (N, H, W) uint16 (single hybrid: H×W can be 512×512, 1024×512, etc.)
-Outputs : run0001/dark_calibration.h5
+Outputs : run0001/offset.h5
           ├── asics/H{0,1,2,3}/
           │   ├── offset/median       (512, 512) float32
           │   ├── offset/sigmaclip    (512, 512) float32
@@ -35,12 +35,12 @@ Algorithms used:
     row (fixed Y) is independent, so median over X for each Y = per-row correction.
 
 CLI shortcut:
-  python -m pnccd_ana.cli.dark_frame_ana --config your.yaml
+  python -m pnccd_ana.cli.offset --config your.yaml
 
 Stage 2 — Noise map and bad-pixel mask from calibration
 ────────────────────────────────────────────────────────
 Purpose  : Derive per-pixel noise RMS and an optional bad-pixel mask.
-Inputs   : dark_calibration.h5
+Inputs   : offset.h5
 Outputs  : noise_map                                        (H, W) float32
            bad_pixel_mask | None                           (H, W) bool
 
@@ -57,7 +57,7 @@ Stage 3 — Source: offset → CM → event recognition
 ─────────────────────────────────────────────────
 Purpose  : Turn raw voltage frames into photon-event lists.
 Inputs   : source_run.raw   shape (N, H, W) uint16 (single hybrid: H×W can be 512×512, 1024×512, etc.)
-           dark_calibration.h5
+           offset.h5
            noise_map                                   (H, W) float32
            search_mask    | None                       (H, W) bool
            bad_pixel_mask | None                      (H, W) bool
@@ -112,9 +112,9 @@ relative to centre at (y,x)):
   Fe-55 doublet: Mn Kα 5.89 keV → ≈1586 ADU,  Kβ 6.39 keV → ≈1723 ADU.
 
 CLI shortcut:
-  python -m pnccd_ana.cli.source_ana --config your.yaml
+  python -m pnccd_ana.cli.event_rec --config your.yaml
 
-Stage 4 — Gain calibration (future)
+Stage 4 — Energy calibration (future)
 ───────────────────────────────────
 Events from Stage 3 are calibrated to photon energy using Fe-55 peaks.
 
@@ -156,19 +156,19 @@ Minimal usage examples for scripts / notebooks
 
 Stage 1 — dark calibration
 ───────────────────────────────────
->>> from pnccd_ana.analysis import run_dark_calibration
->>> run_dark_calibration(
+>>> from pnccd_ana.analysis import run_offset
+>>> run_offset(
 ...     "dark_run.raw",          # RAW 512x512 format
 ...     output_dir="run0001",
 ...     asics=["H0"],            # single ASIC (H0, H1, H2, or H3)
 ...     pedestal_method="both",
 ... )
-#  →  run0001/dark_calibration.h5
+#  →  run0001/offset.h5
 
 Stage 2 — noise map + bad-pixel mask
 ───────────────────────────────────
 >>> from pnccd_ana.analysis import load_calibration, build_noise_map, build_bad_pixel_mask
->>> cal = load_calibration("run0001/dark_calibration.h5", asics=["H0"])
+>>> cal = load_calibration("run0001/offset.h5", asics=["H0"])
 >>> noise = build_noise_map(cal, asics=["H0"])
 >>> bad = build_bad_pixel_mask(
 ...     noise,
@@ -211,7 +211,7 @@ from pathlib import Path
 import numpy as np
 
 # ── Stage 1 ─────────────────────────────────────────────────────────────────────────
-from .cli.dark_frame_ana import run as run_dark_calibration
+from .cli.offset import run as run_offset
 
 # ── Stages 2-3: loaders and processing ─────────────────────────────────────────
 from .lib.noise               import build_bad_pixel_mask
@@ -220,15 +220,15 @@ from .lib.pattern_recognition import find_events, EVENT_DTYPE
 from .utils                 import get_io_module
 
 # ── Stage 4: Gain + CTI calibration ─────────────────────────────────────────
-from .cli.calibration import run as run_gain_calibration
+from .cli.calibration import run as run_energy_cal
 from .cli.calibration import load_gain_cal_h5, save_gain_cal_h5
 from .lib.calibration import apply_full_calibration, MN_KALPHA_EV
 
 # ── Results loaders ──────────────────────────────────────────────────────────────
 from .utils.io_h5 import (
-    load_dark_results_h5,
-    load_source_results_h5,
-    load_gain_results_h5,
+    load_offset_results_h5,
+    load_event_rec_results_h5,
+    load_energy_cal_results_h5,
 )
 
 def load_calibration(path:  str | Path,
@@ -239,7 +239,7 @@ def load_calibration(path:  str | Path,
 
     Parameters
     ----------
-    path  : path to dark_calibration.h5
+    path  : path to offset.h5
     asics : list of ASIC names, e.g. ["H0", "H1"], or None for global-only
 
     Returns
@@ -271,7 +271,7 @@ def build_noise_map(cal:         dict,
     -------
     noise_map : float32 (1024, 1024) — per-pixel electronic noise [ADU RMS]
     """
-    from .cli.source_ana import _build_noise_map
+    from .cli.event_rec import _build_noise_map
     return _build_noise_map(cal, asics=asics, noise_scope=noise_scope)
 
 
@@ -324,7 +324,7 @@ def process_frames(raw_frames:     np.ndarray,
     -------
     events : structured array 1-D with fields Y, X, grade, adu_sum, adu_seed
     """
-    from .cli.source_ana import _correct_frame, _make_worker
+    from .cli.event_rec import _correct_frame, _make_worker
 
     n_frames  = raw_frames.shape[0]
     CHUNK     = 256
@@ -356,14 +356,14 @@ def process_frames(raw_frames:     np.ndarray,
 
 def load_dark_results(path: str | Path) -> dict:
     """
-    Load plot-backing data from dark_results.h5.
+    Load plot-backing data from offset_results.h5.
 
     Use this to reload data for replotting or refitting without rerunning
     the dark frame calibration pipeline.
 
     Parameters
     ----------
-    path : path to dark_results.h5
+    path : path to offset_results.h5
 
     Returns
     -------
@@ -373,26 +373,26 @@ def load_dark_results(path: str | Path) -> dict:
     Example
     -------
     >>> from pnccd_ana.analysis import load_dark_results
-    >>> dark = load_dark_results("run0001/dark_results.h5")
+    >>> dark = load_dark_results("run0001/offset_results.h5")
     >>> offsets = dark["offsets"]
     >>> noise_map = dark["noise"]["map"]
     >>> hist_edges = dark["noise"]["hist_edges"]
     >>> hist_counts = dark["noise"]["hist_counts"]
     """
-    from .utils.io_h5 import load_dark_results_h5 as _load
+    from .utils.io_h5 import load_offset_results_h5 as _load
     return _load(path)
 
 
 def load_source_results(path: str | Path) -> dict:
     """
-    Load plot-backing data from source_results.h5.
+    Load plot-backing data from event_rec_results.h5.
 
     Use this to reload data for replotting or refitting without rerunning
     the source analysis pipeline.
 
     Parameters
     ----------
-    path : path to source_results.h5
+    path : path to event_rec_results.h5
 
     Returns
     -------
@@ -401,27 +401,27 @@ def load_source_results(path: str | Path) -> dict:
     Example
     -------
     >>> from pnccd_ana.analysis import load_source_results
-    >>> src = load_source_results("run0001/source_results.h5")
+    >>> src = load_source_results("run0001/event_rec_results.h5")
     >>> raw = src["raw_spectrum"]
     >>> bin_edges = raw["bin_edges"]
     >>> counts = raw["all_pixels"]
     >>> grades = src["grade_distribution"]["grades"]
     >>> grade_counts = src["grade_distribution"]["counts"]
     """
-    from .utils.io_h5 import load_source_results_h5 as _load
+    from .utils.io_h5 import load_event_rec_results_h5 as _load
     return _load(path)
 
 
 def load_gain_results(path: str | Path) -> dict:
     """
-    Load plot-backing data from gain_results.h5.
+    Load plot-backing data from energy_cal_results.h5.
 
     Use this to reload data for replotting or refitting without rerunning
     the gain calibration pipeline.
 
     Parameters
     ----------
-    path : path to gain_results.h5
+    path : path to energy_cal_results.h5
 
     Returns
     -------
@@ -431,7 +431,7 @@ def load_gain_results(path: str | Path) -> dict:
     Example
     -------
     >>> from pnccd_ana.analysis import load_gain_results
-    >>> gain = load_gain_results("run0001/gain_results.h5")
+    >>> gain = load_gain_results("run0001/energy_cal_results.h5")
     >>> rough = gain["phase1_rough_gain"]
     >>> cti = gain["phase3_cti"]
     >>> col = gain["phase4_column_gain"]
@@ -441,5 +441,5 @@ def load_gain_results(path: str | Path) -> dict:
     >>> print(f"FWHM: {kalpha['fwhm_ev']:.1f} eV")
     >>> print(f"Resolution: {kalpha['resolution_pct']:.2f}%")
     """
-    from .utils.io_h5 import load_gain_results_h5 as _load
+    from .utils.io_h5 import load_energy_cal_results_h5 as _load
     return _load(path)

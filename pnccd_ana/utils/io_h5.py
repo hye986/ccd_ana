@@ -606,9 +606,9 @@ def load_calibration_npy(
 # Results HDF5 load functions
 # ──────────────────────────────────────────────────────────────────────────────
 
-def load_dark_results_h5(path: str | Path) -> dict:
+def load_offset_results_h5(path: str | Path) -> dict:
     """
-    Load plot-backing data from dark_results.h5.
+    Load plot-backing data from offset_results.h5.
 
     Returns dict with keys: offsets, noise, bad_pixels, meta.
     Each contains nested arrays/dicts matching the HDF5 structure.
@@ -672,9 +672,9 @@ def load_dark_results_h5(path: str | Path) -> dict:
     return out
 
 
-def load_source_results_h5(path: str | Path) -> dict:
+def load_event_rec_results_h5(path: str | Path) -> dict:
     """
-    Load plot-backing data from source_results.h5.
+    Load plot-backing data from event_rec_results.h5.
 
     Returns dict with keys: raw_spectrum, grade_distribution, meta.
     """
@@ -711,9 +711,9 @@ def load_source_results_h5(path: str | Path) -> dict:
     return out
 
 
-def load_gain_results_h5(path: str | Path) -> dict:
+def load_energy_cal_results_h5(path: str | Path) -> dict:
     """
-    Load plot-backing data from gain_results.h5.
+    Load plot-backing data from energy_cal_results.h5.
 
     Returns dict with keys: phase1_rough_gain, phase3_cti, phase4_column_gain,
     pixel_gain_map, cti_per_col, final_spectrum, meta.

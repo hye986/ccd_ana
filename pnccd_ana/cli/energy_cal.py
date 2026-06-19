@@ -1,15 +1,15 @@
 """
-pnccd_ana.cli.calibration
-==========================
-Command-line entry point for Fe-55 gain and CTI calibration.
+pnccd_ana.cli.energy_cal
+=========================
+Command-line entry point for energy calibration.
 
-Reads the events.h5 produced by source_ana, runs the four-phase calibration
-pipeline, and writes a gain_calibration.h5 containing all calibration
+Reads the events.h5 produced by event_rec, runs the four-phase calibration
+pipeline, and writes an energy_cal.h5 containing all calibration
 constants.  Diagnostic plots are saved alongside.
 
 Usage
 -----
-  python -m pnccd_ana.cli.calibration analysis.yaml
+  python -m pnccd_ana.cli.energy_cal analysis.yaml
 
 Pipeline
 --------
@@ -18,7 +18,7 @@ Pipeline
   Phase 3 : CTI coefficient estimation + correction (row-dependent)
   Phase 4 : Per-column fine-gain factors
 
-Output HDF5 (gain_calibration.h5)
+Output HDF5 (energy_cal.h5)
 ----------------------------------
   /gain/g_even              scalar float64 — eV/ADU for even columns
   /gain/g_odd               scalar float64 — eV/ADU for odd columns
@@ -72,7 +72,7 @@ from ..utils.io_h5 import load_events_h5
 
 _CAL_DEFAULTS: dict = {
     "events_file":        None,   # input: events.h5 from source_ana
-    "output_file":        None,   # output: gain_calibration.h5
+    "output_file":        None,   # output: energy_cal.h5
     "target_ev":          MN_KALPHA_EV,
     "fit_window_frac":    0.20,   # Gaussian fit window ± fraction of target
     "rough_min_events":   100,    # Phase 1: min singles per parity pool
@@ -90,7 +90,7 @@ _CAL_DEFAULTS: dict = {
 # HDF5 save / load for calibration constants
 # ──────────────────────────────────────────────────────────────────────────────
 
-def save_gain_cal_h5(
+def save_energy_cal_h5(
         path:        str | Path,
         rough:       RoughGainResult,
         cti:         CtiResult,
@@ -176,9 +176,9 @@ def save_gain_cal_h5(
     print("  ✓ saved.")
 
 
-def load_gain_cal_h5(path: str | Path) -> dict:
+def load_energy_cal_h5(path: str | Path) -> dict:
     """
-    Load calibration constants from gain_calibration.h5.
+    Load calibration constants from energy_cal.h5.
 
     Returns
     -------
@@ -974,10 +974,10 @@ def _plot_cti_correction_check(events: np.ndarray,
 
 def run(cfg: Config) -> dict:
     """
-    Execute the gain + CTI calibration pipeline from a Config object.
+    Execute the energy calibration pipeline from a Config object.
 
-    Reads  : {output_dir}/events.h5  (or gain_calibration.events_file in YAML)
-    Writes : {output_dir}/gain_calibration.h5
+    Reads  : {output_dir}/events.h5  (or energy_cal.events_file in YAML)
+    Writes : {output_dir}/energy_cal.h5
              {output_dir}/cal_phase1_rough_gain.png
              {output_dir}/cal_phase3_cti.png
              {output_dir}/cal_phase4_column_gain.png
@@ -986,26 +986,26 @@ def run(cfg: Config) -> dict:
 
     Returns dict with all intermediate and final results.
     """
-    gc      = {**_CAL_DEFAULTS, **(cfg.gain_calibration or {})}
+    ec      = {**_CAL_DEFAULTS, **(cfg.energy_cal or {})}
     gen     = cfg.general
     out_dir = cfg.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    target_ev    = float(gc["target_ev"])
-    window_frac  = float(gc["fit_window_frac"])
+    target_ev    = float(ec["target_ev"])
+    window_frac  = float(ec["fit_window_frac"])
 
     # ── Validate kalpha_adu (must be set by user) ─────────────────────────────
-    kalpha_adu = gc.get("kalpha_adu")
+    kalpha_adu = ec.get("kalpha_adu")
     if kalpha_adu is None:
         raise ValueError(
-            "gain_calibration.kalpha_adu is not set in your analysis.yaml.\n"
-            "  Open your source_ana spectrum plot (spectrum_full_detector.png),\n"
+            "energy_cal.kalpha_adu is not set in your analysis.yaml.\n"
+            "  Open your event_rec spectrum plot (spectrum_full_detector.png),\n"
             "  read the Kα peak position in ADU for single-pixel events,\n"
             "  and add it to your config:\n\n"
-            "    gain_calibration:\n"
+            "    energy_cal:\n"
             "      kalpha_adu: 15000    # your value here\n")
     kalpha_adu     = float(kalpha_adu)
-    kalpha_window  = float(gc.get("kalpha_adu_window", 0.20))
+    kalpha_window  = float(ec.get("kalpha_adu_window", 0.20))
 
     print(f"  Kα peak (user-supplied): {kalpha_adu:.0f} ADU  "
           f"(window ±{kalpha_window:.0%})")
@@ -1013,7 +1013,7 @@ def run(cfg: Config) -> dict:
           f"expected gain ≈ {target_ev/kalpha_adu:.4f} eV/ADU")
 
     # ── Resolve input events file ─────────────────────────────────────────────
-    events_file = gc.get("events_file") or None
+    events_file = ec.get("events_file") or None
     if events_file:
         events_path = cfg.resolve_input_path(events_file)
         if not (events_path and events_path.exists()):
@@ -1024,7 +1024,7 @@ def run(cfg: Config) -> dict:
     if not events_path or not events_path.exists():
         raise FileNotFoundError(
             f"Events file not found: {events_path}\n"
-            "Run source_ana first, or set gain_calibration.events_file in config.")
+            "Run event_rec first, or set energy_cal.events_file in config.")
 
     print(f"\nLoading events from: {events_path}")
     data    = load_events_h5(events_path)
@@ -1048,9 +1048,6 @@ def run(cfg: Config) -> dict:
           + "  ".join(f"G{g}={int((events['grade']==g).sum())}"
                       for g in sorted(np.unique(events["grade"]))))
 
-    target_ev    = float(gc["target_ev"])
-    window_frac  = float(gc["fit_window_frac"])
-
     # ── Phase 1: Rough gain ───────────────────────────────────────────────────
     print("\n── Phase 1: Rough global gain (even / odd columns) ──")
     rough_cal = RoughGainCalibrator(
@@ -1058,7 +1055,7 @@ def run(cfg: Config) -> dict:
         target_ev   = target_ev,
         window_frac = kalpha_window,
         n_bins      = 100,
-        min_events  = int(gc["rough_min_events"]),
+        min_events  = int(ec["rough_min_events"]),
     )
     rough = rough_cal.run(events)
 
@@ -1090,11 +1087,11 @@ def run(cfg: Config) -> dict:
         cti_grade_filter = [int(g) for g in cti_grade_filter]
 
     cti_cal = CtiCalibrator(
-        row_bin_size = int(gc["cti_row_bin_size"]),
+        row_bin_size = int(ec["cti_row_bin_size"]),
         target_ev    = target_ev,
         window_frac  = window_frac * 0.75,   # tighter window in eV space
         n_bins_hist  = 60,
-        min_events   = int(gc["cti_min_events"]),
+        min_events   = int(ec["cti_min_events"]),
         grade_filter = cti_grade_filter,
     )
     cti_result = cti_cal.estimate(events, e_prelim, n_rows)
@@ -1121,8 +1118,8 @@ def run(cfg: Config) -> dict:
         target_ev    = target_ev,
         window_frac  = window_frac * 0.75,
         n_bins       = 60,
-        min_events   = int(gc["col_min_events"]),
-        with_bg      = bool(gc["col_with_bg"]),
+        min_events   = int(ec["col_min_events"]),
+        with_bg      = bool(ec["col_with_bg"]),
     )
     col_result = col_cal.run(events, e_cti, n_cols,
                              grade_filter=col_grade_filter)
@@ -1151,13 +1148,13 @@ def run(cfg: Config) -> dict:
             print(f"\n  ⚠ Final Kα peak fit failed: {chk.message}")
 
     # ── Save calibration constants ─────────────────────────────────────────────
-    output_file = gc.get("output_file")
+    output_file = ec.get("output_file")
     if output_file:
         out_path = cfg.resolve_output_path(output_file)
     else:
-        out_path = out_dir / "gain_calibration.h5"
+        out_path = out_dir / "energy_cal.h5"
 
-    save_gain_cal_h5(
+    save_energy_cal_h5(
         out_path, rough, cti_result, col_result,
         g_even=rough.g_even, g_odd=rough.g_odd,
         energy_ev=energy_ev,
@@ -1168,13 +1165,13 @@ def run(cfg: Config) -> dict:
             "n_rows":            int(n_rows),
             "n_cols":            int(n_cols),
             "target_ev":         float(target_ev),
-            "cti_row_bin_size":  int(gc["cti_row_bin_size"]),
+            "cti_row_bin_size":  int(ec["cti_row_bin_size"]),
             "col_grade_filter":  str(col_grade_filter),
         },
     )
 
     # ── Diagnostic plots ──────────────────────────────────────────────────────
-    if gen.get("save_frame_plots", True) and gc.get("save_plots", True):
+    if gen.get("save_frame_plots", True) and ec.get("save_plots", True):
         print("\nGenerating calibration diagnostic plots …")
         _plot_rough_gain(rough, events, out_dir, target_ev, kalpha_adu, kalpha_window)
         _plot_cti(cti_result, out_dir)
@@ -1185,18 +1182,18 @@ def run(cfg: Config) -> dict:
         _plot_cti_per_col(                                      
             events, e_cti, cti_result, out_dir, target_ev,
             n_rows=n_rows,
-            row_bin_size=int(gc["cti_row_bin_size"]),
-            min_events_per_bin=max(10, int(gc["cti_min_events"]) // 3),
+            row_bin_size=int(ec["cti_row_bin_size"]),
+            min_events_per_bin=max(10, int(ec["cti_min_events"]) // 3),
         )
 
     # ── Save plot-backing data ────────────────────────────────────────────────
-    save_gain_results_h5(
+    save_energy_cal_results_h5(
         out_dir, rough, cti_result, col_result, events, energy_ev,
-        e_prelim, e_cti, gen, gc, target_ev, kalpha_adu, kalpha_window,
+        e_prelim, e_cti, gen, ec, target_ev, kalpha_adu, kalpha_window,
         n_total, n_rows, n_cols,
     )
 
-    print(f"\n✓ Gain + CTI calibration complete.  Output: {out_dir}/")
+    print(f"\n✓ Energy calibration complete.  Output: {out_dir}/")
 
     return dict(
         rough=rough, cti=cti_result, col=col_result,
@@ -1290,7 +1287,7 @@ def _compute_final_spectrum_data(
     }
 
 
-def save_gain_results_h5(
+def save_energy_cal_results_h5(
         out_dir:        Path,
         rough:          RoughGainResult,
         cti_result:     CtiResult,
@@ -1300,7 +1297,7 @@ def save_gain_results_h5(
         e_prelim:       np.ndarray,
         e_cti:          np.ndarray,
         gen:            dict,
-        gc:             dict,
+        ec:             dict,
         target_ev:      float,
         kalpha_adu:     float,
         kalpha_window:  float,
@@ -1309,7 +1306,7 @@ def save_gain_results_h5(
         n_cols:         int,
 ) -> None:
     """
-    Save plot-backing data to gain_results.h5.
+    Save plot-backing data to energy_cal_results.h5.
 
     HDF5 structure:
         /phase1_rough_gain/even/{hist_edges, hist_counts, fit/{...}}
@@ -1323,11 +1320,11 @@ def save_gain_results_h5(
         /final_spectrum/{bin_edges, all_counts, per_group/{...}, kalpha_fit/{...}}
         /meta/...
     """
-    path = out_dir / "gain_results.h5"
+    path = out_dir / "energy_cal_results.h5"
     path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\nSaving gain results: {path}")
+    print(f"\nSaving energy_cal results: {path}")
 
-    row_bin_size = int(gc.get("cti_row_bin_size", 64))
+    row_bin_size = int(ec.get("cti_row_bin_size", 64))
 
     with h5py.File(path, "w") as f:
         # ── Phase 1: Rough gain ───────────────────────────────────────────────
