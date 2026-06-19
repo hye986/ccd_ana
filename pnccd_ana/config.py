@@ -120,8 +120,20 @@ _DEFAULTS: dict[str, Any] = {
             "n_dark_frames":     0,       # 0 → skip clip-fraction test
         },
     },
-    "gain_calibration": {},
-    "cti_calibration":  {},
+    "gain_calibration": {
+        "events_file":       None,    # input: relative to data_dir then output_dir
+        "output_file":       None,    # output: relative to output_dir
+        "target_ev":         5895.0,  # Mn Kα reference energy [eV]
+        "fit_window_frac":   0.20,    # Gaussian fit window ± fraction of target
+        "rough_min_events":  100,     # Phase 1: min single events per parity
+        "cti_row_bin_size":  64,      # Phase 3: rows per CTI bin
+        "cti_min_events":    50,      # Phase 3: min events per row bin
+        "cti_grade_filter":  None,    # None = all grades
+        "col_min_events":    30,      # Phase 4: min events per column
+        "col_with_bg":       False,   # Phase 4: Gaussian + linear background
+        "col_grade_filter":  [0],     # Phase 4: grades used (singles default)
+        "save_plots":        True,
+    },
 }
 
 
@@ -324,8 +336,19 @@ source_spectrum:
     max_clip_fraction: 0.5          # frac of dark frames clipped per pixel above which it's UNSTABLE
     n_dark_frames: 0                # 0 disables the clip-fraction test (no info in the cal file)
 
-# gain_calibration:                 # uncomment and fill in for gain step
-#   events_file: run0001/events.h5
+gain_calibration:
+  events_file: null             # null = use {output_dir}/events.h5
+  output_file: null             # null = use {output_dir}/gain_calibration.h5
+  target_ev: 5895.0             # Mn Kα reference energy [eV]
+  fit_window_frac: 0.20         # Gaussian fit window ± fraction of target
+  rough_min_events: 100         # Phase 1: min single events per parity pool
+  cti_row_bin_size: 64          # Phase 3: rows per CTI bin
+  cti_min_events: 50            # Phase 3: min events per row bin
+  cti_grade_filter: null        # null = all grades; or e.g. [0,1,2,3,4]
+  col_min_events: 30            # Phase 4: min events per column
+  col_with_bg: false            # Phase 4: add linear background to Gaussian fit
+  col_grade_filter: [0]         # Phase 4: grades used for per-column fit
+  save_plots: true
 
 # cti_calibration:                  # uncomment and fill in for CTI step
 #   events_file: run0001/events.h5

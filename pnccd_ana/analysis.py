@@ -219,6 +219,10 @@ from .lib.geometry            import ASIC_SLICES, ALL_ASICS, ASIC_GRID_POS
 from .lib.pattern_recognition import find_events, EVENT_DTYPE
 from .utils                 import get_io_module
 
+# ── Stage 4: Gain + CTI calibration ─────────────────────────────────────────
+from .cli.calibration import run as run_gain_calibration
+from .cli.calibration import load_gain_cal_h5, save_gain_cal_h5
+from .lib.calibration import apply_full_calibration, MN_KALPHA_EV
 
 def load_calibration(path:  str | Path,
                      asics: list[str] | None = None,
