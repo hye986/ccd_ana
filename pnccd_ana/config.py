@@ -40,16 +40,15 @@ Config file format (YAML)
     adu_min: 0.0
     adu_max: 10000.0
     n_bins: 1000
-    save_events: true
-    save_events_to_file: events.h5  # relative to output_dir
+    save_events: events.h5  # relative to output_dir (null to skip saving)
     prefer_offset: sigclip
 
 Path resolution:
   - Input paths (dark_run_file, source_run_file, calibration_file) are resolved
     relative to data_dir if not absolute
-  - Output paths (save_events_to_file) are resolved relative to output_dir
+  - Output paths (save_events) are resolved relative to output_dir
   - calibration_file defaults to {output_dir}/dark_calibration.h5 if not set
-  - save_events_to_file defaults to {output_dir}/events.h5 if not set
+  - save_events defaults to {output_dir}/events.h5 if not set
 
 Sections not present in the YAML are simply skipped at runtime.
 Each CLI script reads only the section(s) it needs, so you can reuse a
@@ -108,8 +107,7 @@ _DEFAULTS: dict[str, Any] = {
         "adu_min":            0.0,
         "adu_max":            10000.0,
         "n_bins":             1000,
-        "save_events":        True,
-        "save_events_to_file": None,   # defaults to {output_dir}/events.h5
+        "save_events":        None,   # defaults to {output_dir}/events.h5
         "prefer_offset":      "sigclip",
         "bad_pixel_mask":     {           # set enabled: false to disable
             "enabled":           True,
@@ -328,8 +326,7 @@ source_spectrum:
   adu_min: 0.0
   adu_max: 10000.0
   n_bins: 1000
-  save_events: true
-  save_events_to_file: events.h5    # relative to output_dir
+  save_events: events.h5            # relative to output_dir (null to skip saving)
   prefer_offset: sigclip            # sigclip | median
   bad_pixel_mask:                   # exclude hot / cold / unstable pixels from event recognition
     enabled: true

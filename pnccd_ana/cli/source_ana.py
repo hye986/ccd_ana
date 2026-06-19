@@ -426,10 +426,6 @@ def run(cfg: Config) -> dict:
                             hit_adu / hit_count, np.nan).astype(np.float32)
 
     # ── Save ──────────────────────────────────────────────────────────────────
-    if sc["save_events"]:
-        np.save(out_dir / "events.npy", events)
-
-    events_h5_path = sc.get("save_events_to_file")
     if events_h5_path:
         # Resolve output path relative to output_dir
         events_path = cfg.resolve_output_path(events_h5_path)
@@ -445,9 +441,7 @@ def run(cfg: Config) -> dict:
                       "n_frames":       int(total_frames_processed)},
         )
 
-    # Also save maps as .npy for quick access
-    np.save(out_dir / "hit_count.npy",   hit_count)
-    np.save(out_dir / "mean_adu_map.npy", mean_adu)
+    # Maps are saved in events.h5 under /maps/
 
     # ── Plots ─────────────────────────────────────────────────────────────────
     print("\nGenerating plots …")

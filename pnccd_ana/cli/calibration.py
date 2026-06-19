@@ -97,6 +97,7 @@ def save_gain_cal_h5(
         col:         ColumnGainResult,
         g_even:      float,
         g_odd:       float,
+        energy_ev:   np.ndarray | None = None,
         metadata:    dict | None = None,
 ) -> None:
     """
@@ -119,6 +120,7 @@ def save_gain_cal_h5(
     /column_gain/peak_col     array
     /column_gain/n_events_col array
     /column_gain/success_col  array
+    /calibrated_events/energy_ev  array (optional)
     /meta/...                 scalars/strings
     """
     path = Path(path)
@@ -155,6 +157,12 @@ def save_gain_cal_h5(
         fg.create_dataset("success_col",   data=col.success_col,   compression="gzip")
         fg.attrs["n_cols_fit"] = int(col.n_cols_fit)
 
+        # ── Calibrated energies ───────────────────────────────────────────────
+        if energy_ev is not None:
+            eg = f.require_group("calibrated_events")
+            eg.attrs["description"] = "Fully calibrated event energies (Phase 1+3+4)"
+            eg.create_dataset("energy_ev", data=energy_ev, compression="gzip")
+
         # ── Metadata ─────────────────────────────────────────────────────────
         mg = f.require_group("meta")
         mg.attrs["mn_kalpha_ev"] = MN_KALPHA_EV
@@ -176,7 +184,8 @@ def load_gain_cal_h5(path: str | Path) -> dict:
     -------
     dict with keys:
         g_even, g_odd, cti, e0, f_col, peak_col, success_col, n_events_col,
-        peak_even_adu, peak_odd_adu, row_bins, peak_per_bin, peak_success
+        peak_even_adu, peak_odd_adu, row_bins, peak_per_bin, peak_success,
+        energy_ev (if available)
     """
     path = Path(path)
     out: dict = {}
@@ -195,6 +204,11 @@ def load_gain_cal_h5(path: str | Path) -> dict:
         out["peak_col"]      = f["column_gain/peak_col"][:]
         out["n_events_col"]  = f["column_gain/n_events_col"][:]
         out["success_col"]   = f["column_gain/success_col"][:]
+
+        # Calibrated energies (optional)
+        if "calibrated_events/energy_ev" in f:
+            out["energy_ev"] = f["calibrated_events/energy_ev"][:]
+
     print(f"  Loaded gain calibration from {path}")
     print(f"    g_even={out['g_even']:.4f}  g_odd={out['g_odd']:.4f}  "
           f"CTI={out['cti']:.3e}  cols_fit={out['success_col'].sum()}")
@@ -1112,6 +1126,7 @@ def run(cfg: Config) -> dict:
     save_gain_cal_h5(
         out_path, rough, cti_result, col_result,
         g_even=rough.g_even, g_odd=rough.g_odd,
+        energy_ev=energy_ev,
         metadata={
             **gen.get("metadata", {}),
             "events_file":       str(events_path),
@@ -1123,10 +1138,6 @@ def run(cfg: Config) -> dict:
             "col_grade_filter":  str(col_grade_filter),
         },
     )
-
-    # Also save final energies as numpy array for quick downstream use
-    np.save(out_dir / "energy_ev.npy", energy_ev)
-    print(f"  → energy_ev.npy  ({len(energy_ev):,} events)")
 
     # ── Diagnostic plots ──────────────────────────────────────────────────────
     if gen.get("save_frame_plots", True) and gc.get("save_plots", True):
