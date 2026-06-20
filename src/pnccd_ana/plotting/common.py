@@ -37,7 +37,9 @@ def _asic_guides(ax):
     pass
 
 
-_GRADE_PALETTE = None
+# Module-level variables (initialized on first use via lazy initialization)
+_GRADE_PALETTE: dict = {}
+_GROUP_LABEL: dict = {}
 
 
 @lru_cache(maxsize=1)
@@ -52,7 +54,12 @@ def _build_grade_palette() -> dict:
     return palette
 
 
-_GRADE_LABEL = None
+def _get_grade_palette() -> dict:
+    """Get or initialize the grade palette (lazy initialization)."""
+    global _GRADE_PALETTE
+    if not _GRADE_PALETTE:
+        _GRADE_PALETTE = _build_grade_palette()
+    return _GRADE_PALETTE
 
 
 @lru_cache(maxsize=1)
@@ -64,6 +71,14 @@ def _build_group_label() -> dict:
         label[gid] = name.title()
     label[GRADE_OTHER] = "Other"
     return label
+
+
+def _get_group_label() -> dict:
+    """Get or initialize the group label (lazy initialization)."""
+    global _GROUP_LABEL
+    if not _GROUP_LABEL:
+        _GROUP_LABEL = _build_group_label()
+    return _GROUP_LABEL
 
 
 def _auto_bin_edges(data, n_bins=80, method="sqrt"):

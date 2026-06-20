@@ -15,7 +15,7 @@ from matplotlib.colors import LogNorm
 
 from ..io.geometry import ASIC_COLORS, ADC_MAX
 from ..physics.pattern_recognition import N_GRADES, GRADE_NAMES, _GRADE_DEFS, GRADE_OTHER
-from .common import _cb, _stats_box, _build_grade_palette, _build_group_label, _auto_bin_edges
+from .common import _cb, _stats_box, _get_grade_palette, _get_group_label, _auto_bin_edges
 
 
 def plot_cm_map(
@@ -139,12 +139,12 @@ def plot_spectrum(spectra: dict[int, np.ndarray], bin_edges: np.ndarray,
 
     # Panel 1: per-grade — iterate only over grades that exist in palette
     ax = axes[0]
-    for g in sorted(_GRADE_PALETTE.keys()):
+    for g in sorted(_get_grade_palette().keys()):
         counts = spectra.get(g, None)
         if counts is None or counts.sum() == 0:
             continue
         ax.step(centres, counts, where="mid",
-                color=_GRADE_PALETTE[g], alpha=0.75, lw=0.9,
+                color=_get_grade_palette()[g], alpha=0.75, lw=0.9,
                 label=f"G{g} {GRADE_NAMES.get(g,'')}")
     ax.set_xlabel("Summed ADU (cluster)"); ax.set_ylabel("Counts / bin")
     ax.set_title("Per-Grade  (cluster-summed charge)")
@@ -169,22 +169,22 @@ def plot_spectrum(spectra: dict[int, np.ndarray], bin_edges: np.ndarray,
             continue
         key = gids_sorted[0]
         ax2.step(centres, total, where="mid",
-                 color=_GRADE_PALETTE.get(key, "#aaaaaa"),
+                 color=_get_grade_palette().get(key, "#aaaaaa"),
                  lw=1.2, alpha=0.9,
-                 label=_GROUP_LABEL.get(key, prefix))
+                 label=_get_group_label().get(key, prefix))
 
     # "other" group
     other_counts = spectra.get(GRADE_OTHER,
                                np.zeros(len(centres), dtype=int))
     if other_counts.sum() > 0:
         ax2.step(centres, other_counts, where="mid",
-                 color=_GRADE_PALETTE[GRADE_OTHER],
+                 color=_get_grade_palette()[GRADE_OTHER],
                  lw=1.2, alpha=0.9,
-                 label=_GROUP_LABEL[GRADE_OTHER])
+                 label=_get_group_label()[GRADE_OTHER])
 
     # All-grades sum
     all_c = sum(spectra.get(g, np.zeros(len(centres), dtype=int))
-                for g in _GRADE_PALETTE.keys())
+                for g in _get_grade_palette().keys())
     ax2.step(centres, all_c, where="mid", color="black",
              lw=1.0, ls="--", alpha=0.8, label="all grades (cluster sum)")
     ax2.set_xlabel("Summed ADU (cluster)"); ax2.set_ylabel("Counts / bin")
@@ -222,10 +222,10 @@ def plot_spectrum(spectra: dict[int, np.ndarray], bin_edges: np.ndarray,
 def plot_grade_distribution(events: np.ndarray, out_dir: Path) -> None:
     """Bar chart of event count per grade."""
     # Build grade list dynamically so new grades are picked up automatically
-    all_grades = sorted(_GRADE_PALETTE.keys())
+    all_grades = sorted(_get_grade_palette().keys())
     counts     = [int((events["grade"] == g).sum()) for g in all_grades]
     labels     = [f"G{g}" for g in all_grades]
-    colours    = [_GRADE_PALETTE[g] for g in all_grades]
+    colours    = [_get_grade_palette()[g] for g in all_grades]
 
     fig, ax = plt.subplots(figsize=(max(12, len(all_grades)), 4))
     bars = ax.bar(range(len(all_grades)), counts,
