@@ -682,8 +682,8 @@ def get_io_module(data_format: str):
     -------
     ::
 
-        io = get_io_module(cfg.dark_frames["data_format"])
-        indices = io.get_frame_indices(cfg.dark_frames["dark_run_file"])
+        io = get_io_module(cfg.offset["data_format"])
+        indices = io.get_frame_indices(cfg.offset["dark_run_file"])
         results = io.process_frames_mt(path, indices, worker_fn)
     """
     fmt = data_format.lower().strip()

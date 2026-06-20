@@ -9,7 +9,7 @@ Config file format (YAML)
   general:
     output_dir: output            # output directory for results
     data_dir: .                  # base input directory
-    # Shared settings (used by both dark_frames and source_spectrum):
+    # Shared settings (used by both offset and event_rec stages):
     data_format: raw             # raw | h5 (file format)
     frame_rows: 1024             # number of rows per frame (Y dimension)
     frame_cols: 512              # number of columns per frame (X dimension)
@@ -22,7 +22,7 @@ Config file format (YAML)
       sample: Fe55_source
       run_date: 2026-05-01
 
-  dark_frames:
+  offset:
     dark_run_file: dark_run.raw  # relative to data_dir
     pedestal_method: both        # median | sigclip | both
     sigma_clip_nsigma: 3.0
@@ -149,7 +149,7 @@ class Config:
 
         cfg = Config.from_yaml("analysis.yaml")
         print(cfg.general["output_dir"])
-        print(cfg.dark_frames["pedestal_method"])
+        print(cfg.offset["pedestal_method"])
 
     Sections not in the YAML are populated with defaults.
     Unknown top-level sections are preserved as-is (for future extensions).

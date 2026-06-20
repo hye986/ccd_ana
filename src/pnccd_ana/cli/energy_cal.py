@@ -220,7 +220,7 @@ def load_energy_cal_h5(path: str | Path) -> dict:
 # Diagnostic plots
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _plot_rough_gain(rough: RoughGainResult,
+def plot_cli_rough_gain(rough: RoughGainResult,
                      events: np.ndarray,
                      out_dir: Path,
                      target_ev: float,
@@ -290,7 +290,7 @@ def _plot_rough_gain(rough: RoughGainResult,
     print(f"  → {p}")
 
 
-def _plot_cti(cti_result: CtiResult, out_dir: Path) -> None:
+def plot_cli_cti(cti_result: CtiResult, out_dir: Path) -> None:
     """Phase 3: peak position vs row and linear CTI fit."""
     import matplotlib
     matplotlib.use("Agg")
@@ -344,7 +344,7 @@ def _plot_cti(cti_result: CtiResult, out_dir: Path) -> None:
     print(f"  → {p}")
 
 
-def _plot_column_gain(col_result: ColumnGainResult, out_dir: Path,
+def plot_cli_column_gain(col_result: ColumnGainResult, out_dir: Path,
                       target_ev: float) -> None:
     """Phase 4: per-column gain factor map and distribution."""
     import matplotlib
@@ -401,7 +401,7 @@ def _plot_column_gain(col_result: ColumnGainResult, out_dir: Path,
     print(f"  → {p}")
 
 
-def _plot_cti_per_col(events: np.ndarray,
+def plot_cli_cti_per_col(events: np.ndarray,
                       e_cti: np.ndarray,
                       cti_result: CtiResult,
                       out_dir: Path,
@@ -580,7 +580,7 @@ def _plot_cti_per_col(events: np.ndarray,
     print(f"  → {p}")
 
 
-def _plot_pixel_gain_map(rough: RoughGainResult,
+def plot_cli_pixel_gain_map(rough: RoughGainResult,
                          col_result: ColumnGainResult,
                          out_dir: Path,
                          target_ev: float) -> None:
@@ -725,7 +725,7 @@ def _plot_pixel_gain_map(rough: RoughGainResult,
     print(f"  → {p}")
 
 
-def _plot_final_spectrum(events: np.ndarray,
+def plot_cli_final_spectrum(events: np.ndarray,
                          energy_ev: np.ndarray,
                          out_dir: Path,
                          target_ev: float) -> None:
@@ -925,7 +925,7 @@ def _compute_cti_check_data(
     return result
 
 
-def _plot_cti_correction_check(events: np.ndarray,
+def plot_cli_cti_correction_check(events: np.ndarray,
                                 e_prelim: np.ndarray,
                                 e_cti: np.ndarray,
                                 cti_result: CtiResult,
@@ -1191,13 +1191,13 @@ def run(cfg: Config) -> dict:
     # ── Diagnostic plots ──────────────────────────────────────────────────────
     if gen.get("save_frame_plots", True) and ec.get("save_plots", True):
         print("\nGenerating calibration diagnostic plots …")
-        _plot_rough_gain(rough, events, out_dir, target_ev, kalpha_adu, kalpha_window)
-        _plot_cti(cti_result, out_dir)
-        _plot_cti_correction_check(events, e_prelim, e_cti, cti_result, out_dir)
-        _plot_column_gain(col_result, out_dir, target_ev)
-        _plot_final_spectrum(events, energy_ev, out_dir, target_ev)
-        _plot_pixel_gain_map(rough, col_result, out_dir, target_ev)
-        _plot_cti_per_col(                                      
+        plot_rough_gain(rough, events, out_dir, target_ev, kalpha_adu, kalpha_window)
+        plot_cti(cti_result, out_dir)
+        plot_cti_correction_check(events, e_prelim, e_cti, cti_result, out_dir)
+        plot_column_gain(col_result, out_dir, target_ev)
+        plot_final_spectrum(events, energy_ev, out_dir, target_ev)
+        plot_pixel_gain_map(rough, col_result, out_dir, target_ev)
+        plot_cti_per_col(
             events, e_cti, cti_result, out_dir, target_ev,
             n_rows=n_rows,
             row_bin_size=int(ec["cti_row_bin_size"]),
@@ -1409,7 +1409,7 @@ def save_energy_cal_results_h5(
         # ── CTI per column ───────────────────────────────────────────────────
         cpc = f.require_group("cti_per_col")
         cpc.create_dataset("col_bin_size", data=row_bin_size, dtype=np.int32)
-        # Note: 2D peak map and per-column CTI computed in _plot_cti_per_col
+        # Note: 2D peak map and per-column CTI computed in plot_cti_per_col
         # would need additional extraction - storing only what's readily available
 
         # ── Final spectrum ───────────────────────────────────────────────────

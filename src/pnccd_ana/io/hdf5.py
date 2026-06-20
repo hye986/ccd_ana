@@ -284,7 +284,7 @@ def load_calibration_h5(
         prefer:    str = "sigclip",   # "sigclip" or "median"
 ) -> dict[str, dict[str, np.ndarray]]:
     """
-    Load calibration maps from a dark_calibration.h5 file.
+    Load calibration maps from an offset.h5 file.
 
     Parameters
     ----------

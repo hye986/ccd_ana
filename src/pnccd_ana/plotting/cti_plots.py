@@ -13,6 +13,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from .common import _cb, _stats_box, _build_grade_palette, _build_group_label
+from .gain_plots import plot_rough_gain, plot_pixel_gain_map
+from .spectrum_plots import plot_final_spectrum
 from ..physics.gain import (RoughGainResult, ColumnGainResult,
                              PeakFitResult, fit_peak, MN_KALPHA_EV, MN_KBETA_EV)
 from ..physics.cti import CtiResult, CtiCalibrator
@@ -577,13 +579,13 @@ def run(cfg: Config) -> dict:
     # ── Diagnostic plots ──────────────────────────────────────────────────────
     if gen.get("save_frame_plots", True) and ec.get("save_plots", True):
         print("\nGenerating calibration diagnostic plots …")
-        _plot_rough_gain(rough, events, out_dir, target_ev, kalpha_adu, kalpha_window)
-        _plot_cti(cti_result, out_dir)
-        _plot_cti_correction_check(events, e_prelim, e_cti, cti_result, out_dir)
-        _plot_column_gain(col_result, out_dir, target_ev)
-        _plot_final_spectrum(events, energy_ev, out_dir, target_ev)
-        _plot_pixel_gain_map(rough, col_result, out_dir, target_ev)
-        _plot_cti_per_col(                                      
+        plot_rough_gain(rough, events, out_dir, target_ev, kalpha_adu, kalpha_window)
+        plot_cti(cti_result, out_dir)
+        plot_cti_correction_check(events, e_prelim, e_cti, cti_result, out_dir)
+        plot_column_gain(col_result, out_dir, target_ev)
+        plot_final_spectrum(events, energy_ev, out_dir, target_ev)
+        plot_pixel_gain_map(rough, col_result, out_dir, target_ev)
+        plot_cti_per_col(
             events, e_cti, cti_result, out_dir, target_ev,
             n_rows=n_rows,
             row_bin_size=int(ec["cti_row_bin_size"]),
@@ -795,7 +797,7 @@ def save_energy_cal_results_h5(
         # ── CTI per column ───────────────────────────────────────────────────
         cpc = f.require_group("cti_per_col")
         cpc.create_dataset("col_bin_size", data=row_bin_size, dtype=np.int32)
-        # Note: 2D peak map and per-column CTI computed in _plot_cti_per_col
+        # Note: 2D peak map and per-column CTI computed in plot_cti_per_col
         # would need additional extraction - storing only what's readily available
 
         # ── Final spectrum ───────────────────────────────────────────────────
