@@ -25,7 +25,7 @@ from ..physics import (find_events,
                        cm_correct_frame)
 from ..io import (load_calibration_h5, load_calibration_npy,
                   save_events_h5,
-                  save_event_rec_results_h5 as _save_event_rec_results_h5)
+                  save_event_rec_results_h5)
 from ..io.hdf5 import (_compute_raw_spectrum_data,
                         _compute_grade_distribution)
 from ..plotting import (plot_hitmap, plot_spectrum,
