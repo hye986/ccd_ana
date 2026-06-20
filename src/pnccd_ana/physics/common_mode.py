@@ -1,5 +1,5 @@
 """
-pnccd_ana.lib.common_mode
+pnccd_ana.physics.common_mode
 =========================
 Common-mode (CM) correction.
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .geometry import ASIC_WIDTH
+from ..io.geometry import ASIC_WIDTH
 
 
 def cm_correct_frame_per_asic(

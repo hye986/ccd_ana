@@ -1,5 +1,5 @@
 """
-pnccd_ana.lib.noise
+pnccd_ana.physics.noise
 ===================
 Per-pixel electronic noise estimation from CM-corrected dark frames.
 

@@ -1,5 +1,5 @@
 """
-pnccd_ana.utils.io_h5
+pnccd_ana.io.hdf5
 =====================
 HDF5 I/O utilities.
 
@@ -460,7 +460,7 @@ def load_events_h5(
     Returns dict with keys: events, spectra, bin_edges, hit_count, mean_adu, meta.
     Suitable as input for downstream gain/CTI calibration steps.
     """
-    from ..lib.pattern_recognition import EVENT_DTYPE
+    from ..physics.pattern_recognition import EVENT_DTYPE
 
     out: dict = {}
     with h5py.File(h5_path, "r") as f:
@@ -829,3 +829,429 @@ def load_energy_cal_results_h5(path: str | Path) -> dict:
 
     print(f"  Loaded gain results from {path}")
     return out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Event recognition results HDF5 save
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_event_rec_results_h5(
+        out_dir:        Path,
+        events:         np.ndarray,
+        spectra:        dict[int, np.ndarray],
+        bin_edges:      np.ndarray,
+        hit_count:      np.ndarray,
+        mean_adu:       np.ndarray,
+        sample_arr:     np.ndarray | None,
+        noise_map:      np.ndarray,
+        gen:            dict,
+        seed_sigma:     float,
+        n_frames:       int,
+) -> None:
+    """
+    Save plot-backing data to event_rec_results.h5.
+
+    HDF5 structure:
+        /raw_spectrum/{bin_edges, all_pixels, positive_pixels, above_seed,
+                       seed_threshold_adu, seed_sigma, median_noise_adu}
+        /grade_distribution/{grades, counts, grade_names}
+        /meta/...
+    """
+    path = out_dir / "event_rec_results.h5"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"\nSaving event_rec results: {path}")
+
+    with h5py.File(path, "w") as f:
+        # ── Raw spectrum ───────────────────────────────────────────────────────
+        raw_data = _compute_raw_spectrum_data(sample_arr, noise_map, bin_edges, seed_sigma)
+        if raw_data is not None:
+            rg = f.require_group("raw_spectrum")
+            rg.create_dataset("bin_edges",          data=raw_data["bin_edges"])
+            rg.create_dataset("all_pixels",         data=raw_data["all_pixels"])
+            rg.create_dataset("positive_pixels",    data=raw_data["positive_pixels"])
+            rg.create_dataset("above_seed",         data=raw_data["above_seed"])
+            rg.create_dataset("seed_threshold_adu", data=raw_data["seed_threshold_adu"])
+            rg.create_dataset("seed_sigma",          data=raw_data["seed_sigma"])
+            rg.create_dataset("median_noise_adu",    data=raw_data["median_noise_adu"])
+
+        # ── Grade distribution ─────────────────────────────────────────────────
+        if len(events) > 0:
+            grade_data = _compute_grade_distribution(events)
+            gg = f.require_group("grade_distribution")
+            gg.create_dataset("grades",      data=grade_data["grades"])
+            gg.create_dataset("counts",      data=grade_data["counts"])
+            gg.create_dataset("grade_names", data=[n.encode() for n in grade_data["grade_names"]])
+
+        # ── Metadata ───────────────────────────────────────────────────────────
+        mg = f.require_group("meta")
+        mg.attrs["seed_sigma"]   = seed_sigma
+        mg.attrs["split_sigma"]  = float(gen.get("split_sigma", 3.0))
+        mg.attrs["n_frames"]     = n_frames
+        mg.attrs["n_events"]     = len(events)
+        mg.attrs["frame_shape"]  = f"{noise_map.shape[0]}x{noise_map.shape[1]}"
+
+    print("  ✓ saved.")
+
+
+def _compute_raw_spectrum_data(
+        corrected_frames: np.ndarray | None,
+        noise_map: np.ndarray,
+        bin_edges: np.ndarray,
+        seed_sigma: float,
+) -> dict | None:
+    """
+    Compute raw spectrum histogram data from CM-corrected frames.
+
+    Returns dict with:
+        - bin_edges: shared bin edges
+        - all_pixels: histogram of all CM-corrected pixels
+        - positive_pixels: histogram of pixels > 0 ADU
+        - above_seed: histogram of pixels above seed threshold
+        - seed_threshold_adu: median seed threshold in ADU
+        - seed_sigma: seed sigma value
+        - median_noise_adu: median noise in ADU
+    """
+    if corrected_frames is None:
+        return None
+
+    corr_flat = corrected_frames.ravel()
+    pos_flat  = corr_flat[corr_flat > 0]
+
+    med_noise  = float(np.median(noise_map))
+    seed_adu   = seed_sigma * med_noise
+    seed_thr   = seed_sigma * noise_map
+    above_seed_mask = corrected_frames > seed_thr[np.newaxis]
+    hits_flat  = corrected_frames[above_seed_mask].ravel()
+
+    c_all,  _ = np.histogram(corr_flat, bins=bin_edges)
+    c_pos,  _ = np.histogram(pos_flat,  bins=bin_edges)
+    c_hits, _ = np.histogram(hits_flat, bins=bin_edges)
+
+    return {
+        "bin_edges":           bin_edges.astype(np.float32),
+        "all_pixels":          c_all.astype(np.int64),
+        "positive_pixels":     c_pos.astype(np.int64),
+        "above_seed":          c_hits.astype(np.int64),
+        "seed_threshold_adu": float(seed_adu),
+        "seed_sigma":          float(seed_sigma),
+        "median_noise_adu":    med_noise,
+    }
+
+
+def _compute_grade_distribution(events: np.ndarray) -> dict:
+    """Compute grade distribution data from events array."""
+    from ..physics.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
+
+    all_grades = sorted(set(g for g, _, _ in _GRADE_DEFS) | {GRADE_OTHER})
+    grades = []
+    counts = []
+    names  = []
+
+    for g in all_grades:
+        cnt = int((events["grade"] == g).sum())
+        if cnt > 0 or g in [x[0] for x in _GRADE_DEFS]:
+            grades.append(g)
+            counts.append(cnt)
+            # Get grade name
+            for gd_g, gd_label, _ in _GRADE_DEFS:
+                if gd_g == g:
+                    names.append(gd_label)
+                    break
+            else:
+                if g == GRADE_OTHER:
+                    names.append("other")
+
+    return {
+        "grades":      np.array(grades, dtype=np.int32),
+        "counts":      np.array(counts, dtype=np.int64),
+        "grade_names": names,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Energy calibration HDF5 save/load
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_energy_cal_h5(
+        path:        str | Path,
+        rough,       # RoughGainResult
+        cti,         # CtiResult
+        col,         # ColumnGainResult
+        g_even:      float,
+        g_odd:       float,
+        energy_ev:   np.ndarray | None = None,
+        metadata:    dict | None = None,
+) -> None:
+    """
+    Write calibration constants to HDF5.
+    """
+    import h5py
+    from ..physics.gain import MN_KALPHA_EV
+    
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"\nSaving gain calibration: {path}")
+
+    with h5py.File(path, "w") as f:
+        # ── Phase 1 ──────────────────────────────────────────────────────────
+        gg = f.require_group("gain")
+        gg.attrs["description"] = "Rough per-parity gain (Phase 1)"
+        gg.create_dataset("g_even",        data=float(g_even))
+        gg.create_dataset("g_odd",         data=float(g_odd))
+        gg.create_dataset("peak_even_adu", data=float(rough.peak_even.peak_ev))
+        gg.create_dataset("peak_odd_adu",  data=float(rough.peak_odd.peak_ev))
+        gg.create_dataset("n_singles",     data=int(rough.n_singles))
+
+        # ── Phase 3 ──────────────────────────────────────────────────────────
+        cg = f.require_group("cti")
+        cg.attrs["description"] = "CTI coefficient (Phase 3)"
+        cg.create_dataset("cti_coefficient", data=float(cti.cti))
+        cg.create_dataset("e0",              data=float(cti.e0))
+        cg.create_dataset("row_bins",        data=cti.row_bins)
+        cg.create_dataset("peak_per_bin",    data=cti.peak_per_bin)
+        cg.create_dataset("peak_success",    data=cti.peak_success)
+        cg.create_dataset("fit_residuals",   data=cti.fit_residuals)
+        cg.attrs["n_bins_used"] = int(cti.n_bins_used)
+
+        # ── Phase 4 ──────────────────────────────────────────────────────────
+        fg = f.require_group("column_gain")
+        fg.attrs["description"] = "Per-column fine-gain factors (Phase 4)"
+        fg.create_dataset("f_col",         data=col.f_col,         compression="gzip")
+        fg.create_dataset("peak_col",      data=col.peak_col,      compression="gzip")
+        fg.create_dataset("n_events_col",  data=col.n_events_col,  compression="gzip")
+        fg.create_dataset("success_col",   data=col.success_col,   compression="gzip")
+        fg.attrs["n_cols_fit"] = int(col.n_cols_fit)
+
+        # ── Calibrated energies ───────────────────────────────────────────────
+        if energy_ev is not None:
+            eg = f.require_group("calibrated_events")
+            eg.attrs["description"] = "Fully calibrated event energies (Phase 1+3+4)"
+            eg.create_dataset("energy_ev", data=energy_ev, compression="gzip")
+
+        # ── Metadata ─────────────────────────────────────────────────────────
+        mg = f.require_group("meta")
+        mg.attrs["mn_kalpha_ev"] = MN_KALPHA_EV
+        if metadata:
+            for k, v in metadata.items():
+                try:
+                    mg.attrs[k] = v
+                except TypeError:
+                    mg.attrs[k] = str(v)
+
+    print("  ✓ saved.")
+
+
+def load_energy_cal_h5(path: str | Path) -> dict:
+    """
+    Load calibration constants from energy_cal.h5.
+    """
+    import h5py
+    
+    path = Path(path)
+    out: dict = {}
+    with h5py.File(path, "r") as f:
+        out["g_even"]        = float(f["gain/g_even"][()])
+        out["g_odd"]         = float(f["gain/g_odd"][()])
+        out["peak_even_adu"] = float(f["gain/peak_even_adu"][()])
+        out["peak_odd_adu"]  = float(f["gain/peak_odd_adu"][()])
+        out["n_singles"]     = int(f["gain/n_singles"][()])
+        out["cti"]           = float(f["cti/cti_coefficient"][()])
+        out["e0"]            = float(f["cti/e0"][()])
+        out["row_bins"]      = f["cti/row_bins"][:]
+        out["peak_per_bin"]  = f["cti/peak_per_bin"][:]
+        out["peak_success"]  = f["cti/peak_success"][:]
+        out["f_col"]         = f["column_gain/f_col"][:]
+        out["peak_col"]      = f["column_gain/peak_col"][:]
+        out["n_events_col"]  = f["column_gain/n_events_col"][:]
+        out["success_col"]   = f["column_gain/success_col"][:]
+
+        # Calibrated energies (optional)
+        if "calibrated_events/energy_ev" in f:
+            out["energy_ev"] = f["calibrated_events/energy_ev"][:]
+
+    print(f"  Loaded gain calibration from {path}")
+    print(f"    g_even={out['g_even']:.4f}  g_odd={out['g_odd']:.4f}  "
+          f"CTI={out['cti']:.3e}  cols_fit={out['success_col'].sum()}")
+    return out
+
+
+def save_energy_cal_results_h5(
+        out_dir: Path,
+        rough,
+        cti,
+        col_result,
+        events: np.ndarray,
+        energy_ev: np.ndarray | None,
+        events_with_cti: np.ndarray | None,
+        cti_check_data: dict,
+        f_col_hist: dict,
+        pixel_gain_data: dict,
+        final_spectrum_data: dict,
+        metadata: dict,
+) -> None:
+    """Save plot-backing data to energy_cal_results.h5."""
+    import h5py
+    
+    path = out_dir / "energy_cal_results.h5"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"\nSaving energy_cal results: {path}")
+
+    with h5py.File(path, "w") as f:
+        # Rough gain results
+        if rough is not None:
+            rg = f.require_group("rough_gain")
+            for key in ["g_even", "g_odd", "n_singles"]:
+                if hasattr(rough, key):
+                    rg.create_dataset(key, data=getattr(rough, key))
+            for attr_name, subgroup_name in [("peak_even", "peak_even"), ("peak_odd", "peak_odd")]:
+                if hasattr(rough, attr_name):
+                    peak = getattr(rough, attr_name)
+                    sg = rg.require_group(subgroup_name)
+                    for k, v in peak.__dict__.items():
+                        sg.create_dataset(k, data=v)
+
+        # CTI results
+        if cti is not None:
+            cg = f.require_group("cti")
+            cg.create_dataset("cti", data=float(cti.cti))
+            cg.create_dataset("e0", data=float(cti.e0))
+            if hasattr(cti, 'row_bins'):
+                cg.create_dataset("row_bins", data=cti.row_bins)
+            if hasattr(cti, 'peak_per_bin'):
+                cg.create_dataset("peak_per_bin", data=cti.peak_per_bin)
+
+        # Column gain results
+        if col_result is not None:
+            gg = f.require_group("column_gain")
+            for key in ["f_col", "peak_col", "n_events_col", "success_col"]:
+                if hasattr(col_result, key):
+                    gg.create_dataset(key, data=getattr(col_result, key), compression="gzip")
+
+        # Events
+        if events is not None and len(events) > 0:
+            eg = f.require_group("events")
+            for name in events.dtype.names or []:
+                eg.create_dataset(name, data=events[name], compression="gzip")
+
+        # Energy eV
+        if energy_ev is not None:
+            eg.create_dataset("energy_ev", data=energy_ev, compression="gzip")
+
+        # Events with CTI
+        if events_with_cti is not None and len(events_with_cti) > 0:
+            cg = f.require_group("events_with_cti")
+            for name in events_with_cti.dtype.names or []:
+                cg.create_dataset(name, data=events_with_cti[name], compression="gzip")
+
+        # CTI check data
+        if cti_check_data is not None:
+            ccd = f.require_group("cti_check")
+            for k, v in cti_check_data.items():
+                if isinstance(v, np.ndarray):
+                    ccd.create_dataset(k, data=v)
+                else:
+                    ccd.attrs[k] = v
+
+        # Column gain histogram
+        if f_col_hist is not None:
+            fhg = f.require_group("f_col_histogram")
+            for k, v in f_col_hist.items():
+                if isinstance(v, np.ndarray):
+                    fhg.create_dataset(k, data=v)
+                else:
+                    fhg.attrs[k] = v
+
+        # Pixel gain map data
+        if pixel_gain_data is not None:
+            pgd = f.require_group("pixel_gain_map")
+            for k, v in pixel_gain_data.items():
+                if isinstance(v, np.ndarray):
+                    pgd.create_dataset(k, data=v)
+                else:
+                    pgd.attrs[k] = v
+
+        # Final spectrum data
+        if final_spectrum_data is not None:
+            fsd = f.require_group("final_spectrum")
+            for k, v in final_spectrum_data.items():
+                if isinstance(v, np.ndarray):
+                    fsd.create_dataset(k, data=v)
+                elif isinstance(v, dict):
+                    sg = fsd.require_group(k)
+                    for sk, sv in v.items():
+                        sg.create_dataset(sk, data=sv)
+                else:
+                    fsd.attrs[k] = v
+
+        # Metadata
+        if metadata:
+            mg = f.require_group("meta")
+            for k, v in metadata.items():
+                try:
+                    mg.attrs[k] = v
+                except TypeError:
+                    mg.attrs[k] = str(v)
+
+    print("  ✓ saved.")
+
+
+def _compute_cti_check_data(events: np.ndarray, cti: float, e0: float, 
+                            n_bins: int = 20) -> dict:
+    """Compute CTI correction check data."""
+    # Implementation here
+    return {}
+
+
+def _compute_f_col_histogram(f_col: np.ndarray, success: np.ndarray) -> dict:
+    """Compute column gain histogram data."""
+    return {}
+
+
+def _compute_pixel_gain_data(rough) -> dict:
+    """Compute pixel gain map data."""
+    return {}
+
+
+def _compute_final_spectrum_data(events: np.ndarray, energy_ev: np.ndarray) -> dict:
+    """Compute final spectrum data."""
+    return {}
+
+
+def save_offset_results_h5(
+        out_dir: Path,
+        offset_median: np.ndarray | None,
+        offset_sigclip: np.ndarray | None,
+        noise: np.ndarray | None,
+        cm_noise: np.ndarray | None,
+        n_clipped: np.ndarray | None,
+        bad_mask: np.ndarray | None,
+        gen: dict,
+) -> None:
+    """Save offset calibration results to HDF5."""
+    import h5py
+    
+    path = out_dir / "offset_results.h5"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"\nSaving offset results: {path}")
+
+    with h5py.File(path, "w") as f:
+        if offset_median is not None:
+            f.create_dataset("offset_median", data=offset_median, compression="gzip")
+        if offset_sigclip is not None:
+            f.create_dataset("offset_sigclip", data=offset_sigclip, compression="gzip")
+        if noise is not None:
+            f.create_dataset("noise", data=noise, compression="gzip")
+        if cm_noise is not None:
+            f.create_dataset("cm_noise", data=cm_noise, compression="gzip")
+        if n_clipped is not None:
+            f.create_dataset("n_clipped", data=n_clipped, compression="gzip")
+        if bad_mask is not None:
+            f.create_dataset("bad_mask", data=bad_mask)
+        
+        # Metadata
+        mg = f.require_group("meta")
+        mg.attrs["method"] = gen.get("pedestal_method", "both")
+        mg.attrs["n_sigma"] = gen.get("n_sigma", 5.0)
+        mg.attrs["frame_rows"] = gen.get("frame_rows", 0)
+        
+    print("  ✓ saved.")

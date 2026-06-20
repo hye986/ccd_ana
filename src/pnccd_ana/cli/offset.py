@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import Config
-from ..lib    import (compute_offset_median,
+from ..physics import (compute_offset_median,
                        compute_offset_sigma_clip,
                        apply_common_mode_correction,
                        compute_noise,
@@ -28,8 +28,8 @@ from ..lib    import (compute_offset_median,
                        ASIC_SLICES, ASIC_MASK, ASIC_WIDTH,
                        build_bad_pixel_mask,
                        configure_asics, get_active_mask)
-from ..utils  import (save_calibration_h5, save_calibration_npy,
-                       plot_offsets, plot_noise, plot_cm_map, plot_bad_pixels)
+from ..io import (save_calibration_h5, save_calibration_npy)
+from ..plotting import (plot_offsets, plot_noise, plot_cm_map, plot_bad_pixels)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -168,7 +168,7 @@ def run(cfg: Config) -> dict:
         print(f"    {p}")
 
     # ── Load dark frames ──────────────────────────────────────────────────────
-    from ..utils.io_raw import get_io_module as _raw_io
+    from ..io.raw import get_io_module as _raw_io
     io = _raw_io(gen.get("data_format", "raw"))
 
     raw_kwargs = {}

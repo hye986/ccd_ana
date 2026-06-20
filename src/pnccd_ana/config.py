@@ -221,7 +221,7 @@ class Config:
         Reads from general['asics'] for single-hybrid mode (ASICs are not
         stage-specific).
         """
-        from .lib.geometry import resolve_asics
+        from .io.geometry import resolve_asics
         raw = self.general.get("asics", None)
         if isinstance(raw, str):
             raw = raw.split()

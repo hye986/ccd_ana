@@ -41,29 +41,30 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import h5py
 import numpy as np
 
 from ..config import Config
-from ..lib.calibration import (
+from ..physics.gain import (
     MN_KALPHA_EV,
     MN_KBETA_EV,
     SINGLE_GRADES,
     SPLIT_GRADES,
     RoughGainCalibrator,
-    CtiCalibrator,
     ColumnGainCalibrator,
     apply_rough_gain,
     apply_full_calibration,
     fit_peak,
-    _gaussian,
     RoughGainResult,
-    CtiResult,
     ColumnGainResult,
 )
-from ..lib.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
-from ..utils.plotting import _build_grade_palette, _build_group_label
-from ..utils.io_h5 import load_events_h5
+from ..physics.cti import CtiCalibrator, CtiResult
+from ..physics.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
+from ..io.hdf5 import load_events_h5
+from ..plotting import (
+    _build_grade_palette, _build_group_label,
+    plot_rough_gain, plot_cti, plot_column_gain, plot_cti_per_col,
+    plot_pixel_gain_map, plot_final_spectrum, plot_cti_correction_check
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -743,8 +744,8 @@ def _plot_final_spectrum(events: np.ndarray,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from ..lib.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
-    from ..utils.plotting import _build_grade_palette, _build_group_label
+    from ..physics.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
+    from ..plotting import _build_grade_palette, _build_group_label
 
     # Both dicts are keyed by the *first* grade ID in each group.
     # _build_grade_palette : grade_id → colour string
@@ -1251,8 +1252,8 @@ def _compute_final_spectrum_data(
         energy_ev: np.ndarray,
         n_bins:    int = 200,
 ) -> dict:
-    from ..lib.calibration import fit_peak, MN_KALPHA_EV
-    from ..lib.pattern_recognition import GRADE_OTHER
+    from ..physics.gain import fit_peak, MN_KALPHA_EV
+    from ..physics.pattern_recognition import GRADE_OTHER
 
     # SINGLE_GRADES and SPLIT_GRADES already imported at module level
     lo, hi    = 3000.0, 9000.0

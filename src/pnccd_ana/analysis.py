@@ -214,18 +214,18 @@ import numpy as np
 from .cli.offset import run as run_offset
 
 # ── Stages 2-3: loaders and processing ─────────────────────────────────────────
-from .lib.noise               import build_bad_pixel_mask
-from .lib.geometry            import ASIC_SLICES, ASIC_NAMES, ASIC_GRID_POS
-from .lib.pattern_recognition import find_events, EVENT_DTYPE
-from .utils                 import get_io_module
+from .physics.noise               import build_bad_pixel_mask
+from .io.geometry            import ASIC_SLICES, ASIC_NAMES, ASIC_GRID_POS
+from .physics.pattern_recognition import find_events, EVENT_DTYPE
+from .io                 import get_io_module
 
 # ── Stage 4: Gain + CTI calibration ─────────────────────────────────────────
 from .cli.energy_cal import run as run_energy_cal
-from .cli.energy_cal import load_energy_cal_h5, save_energy_cal_h5
-from .lib.calibration import apply_full_calibration, MN_KALPHA_EV
+from .io.hdf5 import load_energy_cal_h5, save_energy_cal_h5
+from .physics.gain import apply_full_calibration, MN_KALPHA_EV
 
 # ── Results loaders ──────────────────────────────────────────────────────────────
-from .utils.io_h5 import (
+from .io.hdf5 import (
     load_offset_results_h5,
     load_event_rec_results_h5,
     load_energy_cal_results_h5,
@@ -249,7 +249,7 @@ def load_calibration(path:  str | Path,
       noise["pixel_rms"], noise["cm_rms"],
       noise["n_clipped"] (if sigma-clip was used).
     """
-    from .utils.io_h5 import load_calibration_h5
+    from .io.hdf5 import load_calibration_h5
     return load_calibration_h5(path, asics=asics)
 
 
@@ -379,7 +379,7 @@ def load_dark_results(path: str | Path) -> dict:
     >>> hist_edges = dark["noise"]["hist_edges"]
     >>> hist_counts = dark["noise"]["hist_counts"]
     """
-    from .utils.io_h5 import load_offset_results_h5 as _load
+    from .io.hdf5 import load_offset_results_h5 as _load
     return _load(path)
 
 
@@ -408,7 +408,7 @@ def load_source_results(path: str | Path) -> dict:
     >>> grades = src["grade_distribution"]["grades"]
     >>> grade_counts = src["grade_distribution"]["counts"]
     """
-    from .utils.io_h5 import load_event_rec_results_h5 as _load
+    from .io.hdf5 import load_event_rec_results_h5 as _load
     return _load(path)
 
 
@@ -441,5 +441,5 @@ def load_gain_results(path: str | Path) -> dict:
     >>> print(f"FWHM: {kalpha['fwhm_ev']:.1f} eV")
     >>> print(f"Resolution: {kalpha['resolution_pct']:.2f}%")
     """
-    from .utils.io_h5 import load_energy_cal_results_h5 as _load
+    from .io.hdf5 import load_energy_cal_results_h5 as _load
     return _load(path)

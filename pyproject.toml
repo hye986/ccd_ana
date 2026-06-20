@@ -30,5 +30,4 @@ pnccd-event-rec  = "pnccd_ana.cli.event_rec:main"
 pnccd-energy-cal = "pnccd_ana.cli.energy_cal:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["pnccd_ana*"]
+where = ["src"]

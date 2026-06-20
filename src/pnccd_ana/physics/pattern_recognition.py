@@ -1,5 +1,5 @@
 """
-pnccd_ana.lib.pattern_recognition
+pnccd_ana.physics.pattern_recognition
 ==================================
 Photon-event recognition using connected-component clustering.
 

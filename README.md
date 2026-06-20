@@ -234,7 +234,7 @@ source frame (H × W)
 | 17 | I-shape | up + down |
 | 18 | other | any unrecognised pattern |
 
-Grades are defined in `pnccd_ana/lib/pattern_recognition.py` (`_GRADE_DEFS`).
+Grades are defined in `pnccd_ana/physics/pattern_recognition.py` (`_GRADE_DEFS`).
 Adding a new grade requires only editing that one table.
 
 **Config options (`event_rec` section):**
@@ -443,7 +443,7 @@ noise = build_noise_map(cal)
 bad   = build_bad_pixel_mask(noise)
 
 # Stage 2 — event recognition (batch, no CLI)
-from pnccd_ana.utils.io_raw import read_chunk, get_frame_indices
+from pnccd_ana.io.raw import read_chunk, get_frame_indices
 indices = get_frame_indices("source_run.raw")
 raw     = read_chunk("source_run.raw", indices[:1000])
 events  = process_frames(raw, cal, noise, bad_pixel_mask=bad,
@@ -489,7 +489,7 @@ Key parameters:
 All grade definitions live in one place:
 
 ```
-pnccd_ana/lib/pattern_recognition.py  →  _GRADE_DEFS
+pnccd_ana/physics/pattern_recognition.py  →  _GRADE_DEFS
 ```
 
 To add a grade, append one entry to `_GRADE_DEFS`:
@@ -528,23 +528,30 @@ Positive CTI → peak energy decreases with Y
 
 ```
 pnccd_ana/
-├── cli/
-│   ├── offset.py          Stage 1: offset calibration
-│   ├── event_rec.py       Stage 2: event recognition
-│   ├── energy_cal.py      Stage 3: energy calibration
-│   └── template.py        Config template generator
-├── lib/
-│   ├── pattern_recognition.py   Event finding + grade table
-│   ├── calibration.py           Gain + CTI fitting classes
-│   ├── common_mode.py           CM correction
+├── physics/
 │   ├── pedestal.py              Offset estimation
+│   ├── common_mode.py           CM correction
 │   ├── noise.py                 Noise + bad pixel mask
-│   └── geometry.py              ASIC layout
-├── utils/
-│   ├── io_raw.py          RAW file reader (memory-mapped)
-│   ├── io_h5.py           HDF5 save / load
-│   └── plotting.py        Diagnostic plots
-├── analysis.py            High-level public API
-└── config.py              YAML configuration system
+│   ├── pattern_recognition.py   Event finding + grade table
+│   ├── gain.py                  Gain fitting (Phase 1-2)
+│   └── cti.py                   CTI calibration (Phase 3-4)
+├── io/
+│   ├── geometry.py              ASIC layout
+│   ├── hdf5.py                  HDF5 save / load
+│   └── raw.py                   RAW file reader (memory-mapped)
+├── plotting/
+│   ├── common.py                Shared helpers
+│   ├── offset_plots.py          Offset calibration plots
+│   ├── event_plots.py           Event recognition plots
+│   ├── gain_plots.py            Rough gain plots
+│   ├── cti_plots.py             CTI + column gain plots
+│   └── spectrum_plots.py        Final spectrum plots
+├── cli/
+│   ├── template.py              Config template generator
+│   ├── offset.py                Stage 1: offset calibration
+│   ├── event_rec.py             Stage 2: event recognition
+│   └── energy_cal.py            Stage 3: energy calibration
+├── analysis.py                  High-level public API
+└── config.py                    YAML configuration system
 ```
 

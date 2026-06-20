@@ -17,17 +17,20 @@ import h5py
 import numpy as np
 
 from ..config import Config
-from ..lib    import (find_events,
+from ..physics import (find_events,
                        N_GRADES, EVENT_DTYPE,
                        build_bad_pixel_mask,
                        ASIC_SLICES, ASIC_WIDTH,
-                       configure_asics, get_active_mask)
-from ..lib.common_mode import cm_correct_frame
-from ..utils  import (load_calibration_h5, load_calibration_npy,
-                       save_events_h5,
-                       plot_hitmap, plot_spectrum,
-                       plot_grade_distribution,
-                       plot_raw_spectrum)
+                       configure_asics, get_active_mask,
+                       cm_correct_frame)
+from ..io import (load_calibration_h5, load_calibration_npy,
+                  save_events_h5,
+                  save_event_rec_results_h5 as _save_event_rec_results_h5)
+from ..io.hdf5 import (_compute_raw_spectrum_data,
+                        _compute_grade_distribution)
+from ..plotting import (plot_hitmap, plot_spectrum,
+                        plot_grade_distribution,
+                        plot_raw_spectrum)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -294,7 +297,7 @@ def run(cfg: Config) -> dict:
 
     # ── Discover and process frames across all files ──────────────────────────
     # Always uses RAW format (512x512 or 1024x512 based on frame_rows config)
-    from ..utils.io_raw import get_io_module as raw_get_io_module
+    from ..io.raw import get_io_module as raw_get_io_module
     io = raw_get_io_module(gen.get("data_format", "raw"))
 
     raw_kwargs = {}
@@ -355,7 +358,7 @@ def run(cfg: Config) -> dict:
 
     # ── Diagnostic summary ────────────────────────────────────────────────────
     if len(events):
-        from ..lib.pattern_recognition import GRADE_OTHER as _GRADE_OTHER
+        from ..physics.pattern_recognition import GRADE_OTHER as _GRADE_OTHER
         grade_counts = {int(g): int(n)
                         for g, n in zip(*np.unique(events["grade"], return_counts=True))}
         print(f"  Grade distribution: {grade_counts}")
@@ -404,7 +407,7 @@ def run(cfg: Config) -> dict:
 
     # ── Spectrum histograms ───────────────────────────────────────────────────
     bin_edges = np.linspace(ec["adu_min"], ec["adu_max"], ec["n_bins"] + 1)
-    from ..lib.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
+    from ..physics.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
     spectra: dict[int, np.ndarray] = {}
     all_grade_ids = [gid for gid, _, _ in _GRADE_DEFS] + [GRADE_OTHER]
     for g in all_grade_ids:
@@ -477,143 +480,6 @@ def run(cfg: Config) -> dict:
     print(f"\n✓ Source analysis complete.  Output: {out_dir}/")
     return dict(events=events, spectra=spectra, bin_edges=bin_edges,
                 hit_count=hit_count, mean_adu=mean_adu)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Save plot-backing data to HDF5
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _compute_raw_spectrum_data(
-        corrected_frames: np.ndarray | None,
-        noise_map: np.ndarray,
-        bin_edges: np.ndarray,
-        seed_sigma: float,
-) -> dict | None:
-    """
-    Compute raw spectrum histogram data from CM-corrected frames.
-
-    Returns dict with:
-        - bin_edges: shared bin edges
-        - all_pixels: histogram of all CM-corrected pixels
-        - positive_pixels: histogram of pixels > 0 ADU
-        - above_seed: histogram of pixels above seed threshold
-        - seed_threshold_adu: median seed threshold in ADU
-        - seed_sigma: seed sigma value
-        - median_noise_adu: median noise in ADU
-    """
-    if corrected_frames is None:
-        return None
-
-    corr_flat = corrected_frames.ravel()
-    pos_flat  = corr_flat[corr_flat > 0]
-
-    med_noise  = float(np.median(noise_map))
-    seed_adu   = seed_sigma * med_noise
-    seed_thr   = seed_sigma * noise_map
-    above_seed_mask = corrected_frames > seed_thr[np.newaxis]
-    hits_flat  = corrected_frames[above_seed_mask].ravel()
-
-    c_all,  _ = np.histogram(corr_flat, bins=bin_edges)
-    c_pos,  _ = np.histogram(pos_flat,  bins=bin_edges)
-    c_hits, _ = np.histogram(hits_flat, bins=bin_edges)
-
-    return {
-        "bin_edges":           bin_edges.astype(np.float32),
-        "all_pixels":          c_all.astype(np.int64),
-        "positive_pixels":     c_pos.astype(np.int64),
-        "above_seed":          c_hits.astype(np.int64),
-        "seed_threshold_adu": float(seed_adu),
-        "seed_sigma":          float(seed_sigma),
-        "median_noise_adu":    med_noise,
-    }
-
-
-def _compute_grade_distribution(events: np.ndarray) -> dict:
-    """Compute grade distribution data from events array."""
-    from ..lib.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
-
-    all_grades = sorted(set(g for g, _, _ in _GRADE_DEFS) | {GRADE_OTHER})
-    grades = []
-    counts = []
-    names  = []
-
-    for g in all_grades:
-        cnt = int((events["grade"] == g).sum())
-        if cnt > 0 or g in [x[0] for x in _GRADE_DEFS]:
-            grades.append(g)
-            counts.append(cnt)
-            # Get grade name
-            for gd_g, gd_label, _ in _GRADE_DEFS:
-                if gd_g == g:
-                    names.append(gd_label)
-                    break
-            else:
-                if g == GRADE_OTHER:
-                    names.append("other")
-
-    return {
-        "grades":      np.array(grades, dtype=np.int32),
-        "counts":      np.array(counts, dtype=np.int64),
-        "grade_names": names,
-    }
-
-
-def save_event_rec_results_h5(
-        out_dir:        Path,
-        events:         np.ndarray,
-        spectra:        dict[int, np.ndarray],
-        bin_edges:      np.ndarray,
-        hit_count:      np.ndarray,
-        mean_adu:       np.ndarray,
-        sample_arr:     np.ndarray | None,
-        noise_map:      np.ndarray,
-        gen:            dict,
-        seed_sigma:     float,
-        n_frames:       int,
-) -> None:
-    """
-    Save plot-backing data to event_rec_results.h5.
-
-    HDF5 structure:
-        /raw_spectrum/{bin_edges, all_pixels, positive_pixels, above_seed,
-                       seed_threshold_adu, seed_sigma, median_noise_adu}
-        /grade_distribution/{grades, counts, grade_names}
-        /meta/...
-    """
-    path = out_dir / "event_rec_results.h5"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\nSaving event_rec results: {path}")
-
-    with h5py.File(path, "w") as f:
-        # ── Raw spectrum ───────────────────────────────────────────────────────
-        raw_data = _compute_raw_spectrum_data(sample_arr, noise_map, bin_edges, seed_sigma)
-        if raw_data is not None:
-            rg = f.require_group("raw_spectrum")
-            rg.create_dataset("bin_edges",          data=raw_data["bin_edges"])
-            rg.create_dataset("all_pixels",         data=raw_data["all_pixels"])
-            rg.create_dataset("positive_pixels",    data=raw_data["positive_pixels"])
-            rg.create_dataset("above_seed",         data=raw_data["above_seed"])
-            rg.create_dataset("seed_threshold_adu", data=raw_data["seed_threshold_adu"])
-            rg.create_dataset("seed_sigma",          data=raw_data["seed_sigma"])
-            rg.create_dataset("median_noise_adu",    data=raw_data["median_noise_adu"])
-
-        # ── Grade distribution ─────────────────────────────────────────────────
-        if len(events) > 0:
-            grade_data = _compute_grade_distribution(events)
-            gg = f.require_group("grade_distribution")
-            gg.create_dataset("grades",      data=grade_data["grades"])
-            gg.create_dataset("counts",      data=grade_data["counts"])
-            gg.create_dataset("grade_names", data=[n.encode() for n in grade_data["grade_names"]])
-
-        # ── Metadata ───────────────────────────────────────────────────────────
-        mg = f.require_group("meta")
-        mg.attrs["seed_sigma"]   = seed_sigma
-        mg.attrs["split_sigma"]  = float(gen.get("split_sigma", 3.0))
-        mg.attrs["n_frames"]     = n_frames
-        mg.attrs["n_events"]     = len(events)
-        mg.attrs["frame_shape"]  = f"{noise_map.shape[0]}x{noise_map.shape[1]}"
-
-    print("  ✓ saved.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

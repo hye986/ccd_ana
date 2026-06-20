@@ -1,5 +1,5 @@
 """
-pnccd_ana.utils.io_raw
+pnccd_ana.io.raw
 ======================
 RAW-format I/O utilities.
 
@@ -688,7 +688,7 @@ def get_io_module(data_format: str):
     """
     fmt = data_format.lower().strip()
     if fmt == "h5":
-        from . import io_h5
+        from . import hdf5 as io_h5
         return io_h5
     if fmt == "raw":
         return _RawIOProxy()

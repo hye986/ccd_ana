@@ -1,5 +1,5 @@
 """
-pnccd_ana.lib.geometry
+pnccd_ana.io.geometry
 ======================
 Detector geometry constants for pnCCD operation.
 

@@ -1,5 +1,5 @@
 """
-pnccd_ana.lib.pedestal
+pnccd_ana.physics.pedestal
 ======================
 Per-pixel pedestal (offset) estimation from dark frames.
 
