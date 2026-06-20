@@ -1082,7 +1082,7 @@ def run(cfg: Config) -> dict:
 
     # ── Phase 3: CTI estimation and correction ────────────────────────────────
     print("\n── Phase 3: CTI estimation ──")
-    cti_grade_filter = gc.get("cti_grade_filter")
+    cti_grade_filter = ec.get("cti_grade_filter")
     if cti_grade_filter is not None:
         cti_grade_filter = [int(g) for g in cti_grade_filter]
 
@@ -1110,7 +1110,7 @@ def run(cfg: Config) -> dict:
 
     # ── Phase 4: Per-column fine gain ─────────────────────────────────────────
     print("\n── Phase 4: Per-column fine-gain calibration ──")
-    col_grade_filter = gc.get("col_grade_filter")
+    col_grade_filter = ec.get("col_grade_filter")
     if col_grade_filter is not None:
         col_grade_filter = [int(g) for g in col_grade_filter]
 
@@ -1427,7 +1427,7 @@ def save_energy_cal_results_h5(
         mg.attrs["n_events"]         = n_total
         mg.attrs["n_rows"]           = n_rows
         mg.attrs["n_cols"]           = n_cols
-        mg.attrs["col_bin_size"]     = int(gc.get("cti_row_bin_size", 64))
+        mg.attrs["col_bin_size"]     = int(ec.get("cti_row_bin_size", 64))
 
     print("  ✓ saved.")
 
