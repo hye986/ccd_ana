@@ -68,7 +68,25 @@ def _build_group_label() -> dict:
 
 def _auto_bin_edges(data, n_bins=80, method="sqrt"):
     """Compute histogram bin edges automatically."""
-    flat = np.asarray(data).ravel()
+    arr = np.asarray(data)
+    # Handle structured arrays (e.g., event record with named fields)
+    if arr.dtype.names is not None:
+        # Prefer adu_seed or adu_sum if present; fall back to first numeric field
+        for preferred in ("adu_seed", "adu_sum"):
+            if preferred in arr.dtype.names:
+                arr = arr[preferred]
+                break
+        else:
+            # Use first field that can be cast to float
+            for name in arr.dtype.names:
+                try:
+                    arr = arr[name].astype(float)
+                    break
+                except (ValueError, TypeError):
+                    continue
+            else:
+                raise TypeError(f"No numeric field found in structured array: {arr.dtype}")
+    flat = arr.ravel()
     flat = flat[np.isfinite(flat)]
     if len(flat) == 0:
         raise ValueError("No finite data for binning")
