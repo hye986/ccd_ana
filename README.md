@@ -529,7 +529,7 @@ Positive CTI → peak energy decreases with Y
 ```
 pnccd_ana/
 ├── physics/
-│   ├── pedestal.py              Offset estimation
+│   ├── offsets.py              Offset estimation
 │   ├── common_mode.py           CM correction
 │   ├── noise.py                 Noise + bad pixel mask
 │   ├── pattern_recognition.py   Event finding + grade table

@@ -262,17 +262,17 @@ def plot_raw_spectrum(
     NOT the summed-cluster spectrum from find_events().  The two plots serve
     different purposes:
 
-      plot_raw_spectrum : pixel-level view — pedestal peak near 0, single-pixel
+      plot_raw_spectrum : pixel-level view — offset peak near 0, single-pixel
                           photon hits appearing as a shoulder/peak at higher ADU.
-                          Useful for checking the threshold and pedestal subtraction.
+                          Useful for checking the threshold and offset subtraction.
 
       plot_spectrum_*   : event-level view — events whose cluster pixels are summed.
                           A double-pixel event with two 800 ADU pixels appears at
                           ~1600 ADU, not 800 ADU.
 
     Three distributions shown:
-      grey   : all CM-corrected pixel values  (dominated by the pedestal peak at ~0)
-      blue   : pixels above zero only         (pedestal-subtracted view)
+      grey   : all CM-corrected pixel values  (dominated by the offset peak at ~0)
+      blue   : pixels above zero only         (offset-subtracted view)
       red    : pixels above the seed threshold (candidates entering event recognition)
     """
     centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
@@ -298,7 +298,7 @@ def plot_raw_spectrum(
         c_hits, _ = np.histogram(hits_flat, bins=bin_edges)
 
         ax.step(centres, c_all,  where="mid", color="lightgray",
-                lw=0.8, alpha=0.9, label="all pixels (pedestal peak near 0)")
+                lw=0.8, alpha=0.9, label="all pixels (offset peak near 0)")
         ax.step(centres, c_pos,  where="mid", color="steelblue",
                 lw=1.0, alpha=0.85, label="pixels > 0 ADU")
         ax.step(centres, c_hits, where="mid", color="tomato",

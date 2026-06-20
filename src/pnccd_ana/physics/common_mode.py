@@ -98,7 +98,7 @@ def apply_common_mode_correction(
     Parameters
     ----------
     data        : float32 (n_frames, n_Y, n_X) — raw frames
-    offset      : float32 (n_Y, n_X)           — pedestal map
+    offset      : float32 (n_Y, n_X)           — offset map
     asic_slices : optional ASIC geometry (only non-masked ASICs should be passed)
 
     Returns

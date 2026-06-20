@@ -1,7 +1,7 @@
 """
-pnccd_ana.physics.pedestal
-======================
-Per-pixel pedestal (offset) estimation from dark frames.
+pnccd_ana.physics.offsets
+=========================
+Per-pixel offset estimation from dark frames.
 
 Two methods are provided:
   - Median  : robust to rare signal hits (< 50 % occupancy per pixel)

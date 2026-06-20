@@ -9,7 +9,7 @@ from inflating the noise estimate.
 
 This module also provides ``build_bad_pixel_mask`` for flagging pixels
 that should be excluded from photon-event recognition (hot, cold/stuck,
-or heavily clipped during sigma-clip pedestal estimation).
+or heavily clipped during sigma-clip offset estimation).
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ def build_bad_pixel_mask(
     ----------
     noise_map         : float (Y, X) — per-pixel RMS from dark calibration.
     n_clipped_map     : float (Y, X) or None — frames clipped per pixel
-                        during sigma-clip pedestal (from
+                        during sigma-clip offset (from
                         ``compute_offset_sigma_clip``).
     n_dark_frames     : int — total number of dark frames the noise was
                         estimated from.  Required if n_clipped_map is given.
