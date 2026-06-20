@@ -876,46 +876,50 @@ def _plot_final_spectrum(events: np.ndarray,
 
 
 def _compute_cti_check_data(
-        events: np.ndarray,
-        e_prelim: np.ndarray,
-        e_cti: np.ndarray,
+        events:       np.ndarray,
+        e_prelim:     np.ndarray,
+        e_cti:        np.ndarray,
         row_bin_size: int = 64,
 ) -> dict:
     """
-    Compute before/after CTI correction data for peak-vs-row plots.
+    Compute before/after CTI correction peak-vs-row data for single events.
+
+    Both e_prelim and e_cti must have the same length as events (all grades).
+    The function filters to singles internally using a mask over the full array.
 
     Returns dict with:
-        - before: {row_bins, peak_per_bin, peak_success}
-        - after:  {row_bins, peak_per_bin, peak_success}
+        before: {row_bins, peak_per_bin, peak_success}
+        after:  {row_bins, peak_per_bin, peak_success}
     """
-    s_mask = np.isin(events["grade"], list(SINGLE_GRADES))
-    rows_s = events["Y"][s_mask].astype(int)
-    max_row = int(rows_s.max()) + 1 if len(rows_s) > 0 else 1
+    # Build singles mask over the FULL events array
+    s_mask   = np.isin(events["grade"], list(SINGLE_GRADES))
+    rows_s   = events["Y"][s_mask].astype(int)      # rows of single events
+    ep_s     = e_prelim[s_mask]                      # prelim energy, singles only
+    ec_s     = e_cti[s_mask]                         # CTI-corrected, singles only
+
+    max_row   = int(rows_s.max()) + 1 if len(rows_s) > 0 else 1
     bin_edges = np.arange(0, max_row + row_bin_size + 1, row_bin_size)
-    bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    bin_ctrs  = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
     result = {
-        "before": {"row_bins": bin_centres, "peak_per_bin": [], "peak_success": []},
-        "after":  {"row_bins": bin_centres, "peak_per_bin": [], "peak_success": []},
+        "before": {"row_bins": bin_ctrs,
+                   "peak_per_bin": np.full(len(bin_ctrs), np.nan),
+                   "peak_success": np.zeros(len(bin_ctrs), dtype=bool)},
+        "after":  {"row_bins": bin_ctrs,
+                   "peak_per_bin": np.full(len(bin_ctrs), np.nan),
+                   "peak_success": np.zeros(len(bin_ctrs), dtype=bool)},
     }
 
-    for ep in [e_prelim, e_cti]:
-        key = "before" if ep is e_prelim else "after"
-        for y0, y1, rc in zip(bin_edges[:-1], bin_edges[1:], bin_centres):
-            bm = (rows_s >= y0) & (rows_s < y1)
-            if bm.sum() < 30:
-                result[key]["peak_per_bin"].append(np.nan)
-                result[key]["peak_success"].append(False)
-                continue
+    for ri, (y0, y1) in enumerate(zip(bin_edges[:-1], bin_edges[1:])):
+        bm = (rows_s >= y0) & (rows_s < y1)   # mask over singles arrays
+        if bm.sum() < 30:
+            continue
+        for key, ep in [("before", ep_s), ("after", ec_s)]:
             res = fit_peak(ep[bm], nominal=MN_KALPHA_EV,
                            window_frac=0.15, n_bins=50, min_events=30)
-            result[key]["peak_per_bin"].append(res.peak_ev if res.success else np.nan)
-            result[key]["peak_success"].append(res.success)
-
-    result["before"]["peak_per_bin"] = np.array(result["before"]["peak_per_bin"], dtype=np.float64)
-    result["before"]["peak_success"]  = np.array(result["before"]["peak_success"], dtype=bool)
-    result["after"]["peak_per_bin"]   = np.array(result["after"]["peak_per_bin"], dtype=np.float64)
-    result["after"]["peak_success"]   = np.array(result["after"]["peak_success"], dtype=bool)
+            if res.success:
+                result[key]["peak_per_bin"][ri] = res.peak_ev
+                result[key]["peak_success"][ri] = True
 
     return result
 
@@ -925,13 +929,14 @@ def _plot_cti_correction_check(events: np.ndarray,
                                 e_cti: np.ndarray,
                                 cti_result: CtiResult,
                                 out_dir: Path) -> None:
-    """Before/after CTI correction: peak-vs-row comparison."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    bin_size = cti_result.row_bins[1] - cti_result.row_bins[0] if len(cti_result.row_bins) > 1 else 64
-    data = _compute_cti_check_data(events, e_prelim, e_cti, row_bin_size=bin_size)
+    bin_size = (cti_result.row_bins[1] - cti_result.row_bins[0]
+                if len(cti_result.row_bins) > 1 else 64)
+    data = _compute_cti_check_data(events, e_prelim, e_cti,
+                                   row_bin_size=int(bin_size))
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle("CTI Correction Check — Peak position vs Row",
@@ -941,25 +946,37 @@ def _plot_cti_correction_check(events: np.ndarray,
         (axes[0], "before", "Before CTI correction", "steelblue"),
         (axes[1], "after",  "After CTI correction",  "darkorange"),
     ]:
-        row_arr  = data[key]["row_bins"]
-        pk_arr   = data[key]["peak_per_bin"]
-        success  = data[key]["peak_success"]
+        row_arr = data[key]["row_bins"]
+        pk_arr  = data[key]["peak_per_bin"]
+        success = data[key]["peak_success"]
+        valid   = success & np.isfinite(pk_arr)
 
-        valid = success & ~np.isnan(pk_arr)
-        if np.any(valid):
-            ax.scatter(row_arr[valid], pk_arr[valid], s=25, color=colour, zorder=3)
+        n_valid = int(valid.sum())
+        spread  = float(np.nanstd(pk_arr[valid])) if n_valid > 1 else 0.0
+
+        if n_valid > 0:
+            ax.scatter(row_arr[valid], pk_arr[valid],
+                       s=25, color=colour, zorder=3,
+                       label=f"Kα peak per row bin  (N={n_valid})")
+        else:
+            ax.text(0.5, 0.5, "No valid row bins",
+                    transform=ax.transAxes, ha="center", va="center",
+                    fontsize=11, color="gray")
+
         ax.axhline(MN_KALPHA_EV, color="k", lw=1, ls="--",
                    label=f"Mn Kα = {MN_KALPHA_EV:.0f} eV")
+
         ax.set_xlabel("Row (Y)")
         ax.set_ylabel("Kα peak [eV]")
         ax.set_title(label)
-        ax.legend(fontsize=8)
         ax.grid(alpha=0.3)
 
-        spread = float(np.nanstd(pk_arr)) if np.any(valid) else 0.0
-        ax.text(0.97, 0.03, f"σ = {spread:.1f} eV",
-                transform=ax.transAxes, ha="right", va="bottom", fontsize=9,
-                bbox=dict(boxstyle="round", fc="white", alpha=0.8))
+        if n_valid > 0:
+            ax.legend(fontsize=8)
+            ax.text(0.97, 0.03, f"σ = {spread:.1f} eV",
+                    transform=ax.transAxes, ha="right", va="bottom",
+                    fontsize=9,
+                    bbox=dict(boxstyle="round", fc="white", alpha=0.8))
 
     plt.tight_layout()
     p = out_dir / "cal_cti_correction_check.png"
@@ -1230,59 +1247,53 @@ def _compute_pixel_gain_data(rough: RoughGainResult,
 
 
 def _compute_final_spectrum_data(
-        events: np.ndarray,
+        events:    np.ndarray,
         energy_ev: np.ndarray,
-        n_bins: int = 200,
+        n_bins:    int = 200,
 ) -> dict:
-    """Compute final calibrated spectrum data."""
-    from .lib.calibration import fit_peak
-    from .lib.pattern_recognition import SINGLE_GRADES, SPLIT_GRADES, GRADE_OTHER
+    from ..lib.calibration import fit_peak, MN_KALPHA_EV
+    from ..lib.pattern_recognition import GRADE_OTHER
 
-    # Energy range based on 0-12000 eV (typical range for Fe-55)
-    lo, hi = 0, 12000
+    # SINGLE_GRADES and SPLIT_GRADES already imported at module level
+    lo, hi    = 3000.0, 9000.0
     bin_edges = np.linspace(lo, hi, n_bins + 1)
-    centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-
-    # All grades
     all_counts, _ = np.histogram(energy_ev, bins=bin_edges)
 
-    # Per-group histograms
-    groups = {}
-    for label, grades in [
+    groups: dict = {}
+    for grp_name, grades in [
         ("single", SINGLE_GRADES),
         ("split",  SPLIT_GRADES),
-        ("other",  {GRADE_OTHER}),
+        ("other",  frozenset({GRADE_OTHER})),
     ]:
         mask = np.isin(events["grade"], list(grades))
         if mask.sum() > 0:
-            grp_counts, _ = np.histogram(energy_ev[mask], bins=bin_edges)
-            groups[label] = {
-                "counts":     grp_counts.astype(np.int64),
-                "grade_ids":  np.array(list(grades), dtype=np.int32),
+            c, _ = np.histogram(energy_ev[mask], bins=bin_edges)
+            groups[grp_name] = {
+                "counts":    c.astype(np.int64),
+                "grade_ids": np.array(list(grades), dtype=np.int32),
             }
 
-    # K-alpha fit on single-grade events
     s_mask = np.isin(events["grade"], list(SINGLE_GRADES))
-    fit_result = fit_peak(energy_ev[s_mask], nominal=MN_KALPHA_EV,
-                          window_frac=0.10, n_bins=80, min_events=30)
+    res = fit_peak(energy_ev[s_mask], nominal=MN_KALPHA_EV,
+                   window_frac=0.10, n_bins=80, min_events=30)
 
     kalpha_data = {
-        "peak_ev":         float(fit_result.peak_ev) if fit_result.success else np.nan,
-        "sigma_ev":        float(fit_result.sigma) if fit_result.success else np.nan,
-        "amplitude":       float(fit_result.amplitude) if fit_result.success else np.nan,
-        "fwhm_ev":         float(2.355 * fit_result.sigma) if fit_result.success else np.nan,
-        "resolution_pct":  float(235.5 * fit_result.sigma / fit_result.peak_ev)
-                           if fit_result.success and fit_result.peak_ev > 0 else np.nan,
-        "n_events":        int(s_mask.sum()),
-        "success":         bool(fit_result.success),
-        "fit_window_lo":   float(fit_result.peak_ev * 0.90) if fit_result.success else np.nan,
-        "fit_window_hi":   float(fit_result.peak_ev * 1.10) if fit_result.success else np.nan,
+        "peak_ev":        float(res.peak_ev)   if res.success else np.nan,
+        "sigma_ev":       float(res.sigma_ev)  if res.success else np.nan,
+        "amplitude":      float(res.amplitude) if res.success else np.nan,
+        "fwhm_ev":        float(2.3548 * res.sigma_ev)  if res.success else np.nan,
+        "resolution_pct": float(2.3548 * res.sigma_ev / res.peak_ev * 100)
+                          if res.success and res.peak_ev > 0 else np.nan,
+        "n_events":       int(s_mask.sum()),
+        "success":        bool(res.success),
+        "fit_window_lo":  float(res.peak_ev * 0.90) if res.success else np.nan,
+        "fit_window_hi":  float(res.peak_ev * 1.10) if res.success else np.nan,
     }
 
     return {
-        "bin_edges": bin_edges.astype(np.float32),
+        "bin_edges":  bin_edges.astype(np.float32),
         "all_counts": all_counts.astype(np.int64),
-        "groups": groups,
+        "groups":     groups,
         "kalpha_fit": kalpha_data,
     }
 
@@ -1340,7 +1351,7 @@ def save_energy_cal_results_h5(
             lo_adu = kalpha_adu * (1 - kalpha_window)
             hi_adu = kalpha_adu * (1 + kalpha_window)
             singles_mask = (events["grade"] == 0) & (events["X"] % 2 == (0 if parity_name == "even" else 1))
-            evts_par = events[single_mask]
+            evts_par = events[singles_mask]
             counts, edges = np.histogram(evts_par["adu_sum"], bins=100, range=(lo_adu, hi_adu))
             pg.create_dataset("hist_edges",  data=edges.astype(np.float32))
             pg.create_dataset("hist_counts", data=counts.astype(np.int64))
@@ -1348,10 +1359,10 @@ def save_energy_cal_results_h5(
             # Fit parameters
             fg = pg.require_group("fit")
             fg.create_dataset("peak_adu",   data=float(peak_info.peak_ev))
-            fg.create_dataset("sigma_adu",  data=float(peak_info.sigma))
+            fg.create_dataset("sigma_adu",  data=float(peak_info.sigma_ev))
             fg.create_dataset("amplitude",  data=float(peak_info.amplitude))
             fg.create_dataset("success",    data=bool(peak_info.success))
-            fg.create_dataset("n_events",   data=int(np.sum(single_mask)))
+            fg.create_dataset("n_events",   data=int(np.sum(singles_mask)))
 
         # Window
         wg = p1g.require_group("window")
