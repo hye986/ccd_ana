@@ -15,7 +15,7 @@ from matplotlib.colors import LogNorm
 
 from ..io.geometry import ASIC_COLORS, ADC_MAX
 from ..physics.pattern_recognition import N_GRADES, GRADE_NAMES, _GRADE_DEFS, GRADE_OTHER
-from .common import _cb, _stats_box, _get_grade_palette, _get_group_label, _auto_bin_edges
+from .common import _cb, _stats_box, _get_grade_palette, _get_group_label, _adjust_bin_range
 
 
 def plot_cm_map(
@@ -129,7 +129,7 @@ def plot_spectrum(spectra: dict[int, np.ndarray], bin_edges: np.ndarray,
     Automatically detects if the bin range misses the peaks and adjusts.
     """
     if events is not None and len(events):
-        bin_edges = _auto_bin_edges(events, bin_edges)
+        bin_edges = _adjust_bin_range(events, bin_edges)
 
     centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     n_panels = 3 if (events is not None and len(events)) else 2

@@ -113,3 +113,30 @@ def _auto_bin_edges(data, n_bins=80, method="sqrt"):
         n = n_bins
     lo, hi = np.percentile(flat, [0.5, 99.5])
     return np.linspace(lo, hi, n + 1)
+
+
+def _adjust_bin_range(data, bin_edges):
+    """Adjust bin range based on data percentiles, keeping the same number of bins."""
+    arr = np.asarray(data)
+    # Handle structured arrays
+    if arr.dtype.names is not None:
+        for preferred in ("adu_seed", "adu_sum"):
+            if preferred in arr.dtype.names:
+                arr = arr[preferred]
+                break
+        else:
+            for name in arr.dtype.names:
+                try:
+                    arr = arr[name].astype(float)
+                    break
+                except (ValueError, TypeError):
+                    continue
+            else:
+                raise TypeError(f"No numeric field found in structured array: {arr.dtype}")
+    flat = arr.ravel()
+    flat = flat[np.isfinite(flat)]
+    if len(flat) == 0:
+        return bin_edges
+    lo, hi = np.percentile(flat, [0.5, 99.5])
+    n = len(bin_edges) - 1  # preserve number of bins
+    return np.linspace(lo, hi, n + 1)
