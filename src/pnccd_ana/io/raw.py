@@ -552,6 +552,36 @@ def get_frame_indices(
     return idx
 
 
+def _apply_frame_selection(
+        indices:     np.ndarray,
+        skip_frames: int = 0,
+        max_frames:  int | None = None,
+) -> np.ndarray:
+    """
+    Apply a leading skip and optional cap to a frame index array.
+
+    Parameters
+    ----------
+    indices     : frame indices returned by get_frame_indices()
+    skip_frames : drop the first N indices
+    max_frames  : cap total count after skipping
+    """
+    if skip_frames > 0:
+        if skip_frames >= len(indices):
+            raise ValueError(
+                f"skip_frames={skip_frames} >= total frames "
+                f"in first file ({len(indices)}). "
+                "Nothing left to process.")
+        indices = indices[skip_frames:]
+        print(f"  Skipping first {skip_frames} frames "
+              f"({len(indices)} remaining)")
+
+    if max_frames is not None:
+        indices = indices[:max_frames]
+
+    return indices
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Chunk iteration helpers  (identical API to io_h5)
 # ──────────────────────────────────────────────────────────────────────────────

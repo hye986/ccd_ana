@@ -1,6 +1,7 @@
 """io sub-package – I/O for raw data, HDF5, and geometry."""
-from .raw      import (get_frame_indices, read_chunk, make_chunks,
-                        process_frames_mt, detect_raw_geometry, get_io_module)
+from .raw      import (get_frame_indices, _apply_frame_selection,
+                        read_chunk, make_chunks, process_frames_mt,
+                        detect_raw_geometry, get_io_module)
 from .hdf5     import (save_calibration_h5, load_calibration_h5,
                         save_calibration_npy, load_calibration_npy,
                         save_events_h5, load_events_h5,

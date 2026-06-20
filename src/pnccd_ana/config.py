@@ -94,12 +94,16 @@ _DEFAULTS: dict[str, Any] = {
         "pedestal_method":          "both",
         "sigma_clip_nsigma":        3.0,
         "compare_pedestal_methods": True,
+        "skip_frames":              0,
+        "max_frames":               None,
         "save_npy":                 True,
         "save_h5":                  True,
     },
     "event_rec": {
         "source_run_file":    None,
         "calibration_file":   None,   # defaults to {output_dir}/offset.h5
+        "skip_frames":        0,
+        "max_frames":         None,
         "seed_sigma":         5.0,
         "split_sigma":        3.0,
         "noise_scope":        "auto",
@@ -313,12 +317,18 @@ offset:
   pedestal_method: both             # median | sigclip | both
   sigma_clip_nsigma: 3.0
   compare_pedestal_methods: true    # compare median vs sigma-clip offsets
+  skip_frames: 0                    # skip this many frames at start of first file
+                                    # (warm-up / shutter transient / bad first frames)
+  max_frames: null                  # overrides general.max_frames for this stage
+                                    # null = fall back to general.max_frames
   save_npy: true                    # save as .npy files
   save_h5: true                     # save as .h5 file
 
 event_rec:
   source_run_file: source_run.raw   # relative to data_dir
   calibration_file: offset.h5  # relative to data_dir (or output_dir if not found)
+  skip_frames: 0                    # same as above, applied to source run files
+  max_frames: null                  # overrides general.max_frames for this stage
   seed_sigma: 5.0                   # threshold for finding candidate centres (3-8 × noise)
   split_sigma: 3.0                  # threshold for classifying neighbours (1-3 × noise)
   noise_scope: auto                 # auto | global | asic

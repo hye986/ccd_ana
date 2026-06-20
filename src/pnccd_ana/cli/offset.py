@@ -180,18 +180,32 @@ def run(cfg: Config) -> dict:
     def _passthrough(raw: np.ndarray, _idx: np.ndarray) -> np.ndarray:
         return raw
 
+    stage_skip = int(oc.get("skip_frames", 0))
+    stage_max = oc.get("max_frames", None)
+    if stage_max is not None:
+        stage_max = int(stage_max)
+    effective_max = stage_max if stage_max is not None else gen["max_frames"]
+
     all_chunks: list[np.ndarray] = []
-    remaining = gen["max_frames"]
+    remaining = effective_max
     total_frames = 0
+    is_first_file = True
 
     for fpath in run_files:
         if remaining is not None and remaining <= 0:
             break
         print(f"\n  Loading: {fpath}")
+        request_max = remaining if remaining is None else remaining + (stage_skip if is_first_file else 0)
         indices = io.get_frame_indices(fpath,
                                        complete_only=gen["complete_only"],
-                                       max_frames=remaining,
+                                       max_frames=request_max,
                                        **raw_kwargs)
+        if is_first_file and stage_skip > 0:
+            from ..io.raw import _apply_frame_selection
+            indices = _apply_frame_selection(indices,
+                                             skip_frames=stage_skip,
+                                             max_frames=remaining)
+        is_first_file = False
         chunks = io.process_frames_mt(fpath, indices, _passthrough,
                                       chunk_size=gen["chunk_size"],
                                       n_workers=gen["n_workers"],
@@ -201,6 +215,10 @@ def run(cfg: Config) -> dict:
         if remaining is not None:
             remaining -= len(indices)
         total_frames += len(indices)
+
+    print(f"\n  Frame selection: skip={stage_skip}  "
+          f"max={effective_max if effective_max is not None else 'all'}  "
+          f"total loaded={total_frames}")
 
     data_raw = np.concatenate(all_chunks, axis=0)
     H, W = data_raw.shape[1], data_raw.shape[2]
