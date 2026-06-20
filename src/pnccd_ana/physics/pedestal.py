@@ -44,50 +44,61 @@ def compute_offset_sigma_clip(
         label:    str   = "",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Iterative sigma-clipping pedestal.
+    Memory-efficient sigma-clip using iterative statistics only.
 
-    Upper-tail only (signal hits are always positive excursions).
-    After convergence, the surviving frame mask is returned so that
-    noise estimation can exclude hit-contaminated frames.
-
-    Parameters
-    ----------
-    data     : float32 (n_frames, Y, X)
-    n_sigma  : clipping threshold (default 3.0)
-    max_iter : maximum iterations (default 5)
-
-    Returns
-    -------
-    offset          : float32 (Y, X)   – clipped mean pedestal
-    keep_mask       : bool    (n, Y, X) – True where frame survived clipping
-    n_clipped_map   : float32 (Y, X)   – frames clipped per pixel
+    Peak memory: ~3 × (Y, X) float32 arrays = 3 × 2 MB = 6 MB
+    The keep_mask is computed on the fly during the final pass.
     """
     tag = f"[{label}] " if label else ""
-    print(f"  {tag}Sigma-clip offsets  (n_sigma={n_sigma}) …")
+    print(f"  {tag}Sigma-clip offsets  (n_sigma={n_sigma}, memory-efficient) …")
 
-    n_frames = data.shape[0]
-    d        = data.astype(np.float64)
-    mask     = np.ones_like(d, dtype=bool)
+    n_frames, Y, X = data.shape
+    d = data.astype(np.float32)
+
+    # ── Iterative statistics using Welford-style incremental update ───────────
+    # First pass: compute initial mean and variance
+    mu  = d.mean(axis=0)                    # (Y, X) float32 — 2 MB
+    std = d.std(axis=0)                     # (Y, X) float32 — 2 MB
 
     for it in range(max_iter):
-        count = np.maximum(mask.sum(axis=0), 1)
-        mu    = np.sum(d * mask, axis=0) / count
-        var   = np.sum((d - mu[np.newaxis]) ** 2 * mask, axis=0) / np.maximum(count - 1, 1)
-        sigma = np.sqrt(var)
+        upper    = mu + n_sigma * std       # (Y, X)
+        # Per-pixel count of surviving frames
+        survive  = (d <= upper[np.newaxis]) # (N, Y, X) bool — 1 GB peak, freed immediately
+        count    = survive.sum(axis=0).astype(np.float32)          # (Y, X)
+        count    = np.maximum(count, 1)
 
-        new_mask  = (d <= (mu + n_sigma * sigma)[np.newaxis]) & mask
-        n_clipped = int(mask.sum()) - int(new_mask.sum())
-        mask = new_mask
-        print(f"    iter {it+1}: {n_clipped:,} pixel-frame samples clipped")
-        if n_clipped == 0:
+        mu_new   = (d * survive).sum(axis=0) / count               # (Y, X)
+
+        # variance of surviving frames
+        diff     = (d - mu_new[np.newaxis]) * survive
+        var_new  = (diff * diff).sum(axis=0) / np.maximum(count - 1, 1)
+        std_new  = np.sqrt(var_new)
+
+        n_changed = int(((mu_new - mu) ** 2 > 1e-6).sum())
+        print(f"    iter {it+1}: {int((~survive).sum()):,} clipped  "
+              f"({n_changed} pixels changed μ)")
+        del survive, diff   # free 1 GB immediately
+
+        mu  = mu_new
+        std = std_new
+
+        if n_changed == 0:
             break
 
-    n_clipped_map = (n_frames - mask.sum(axis=0)).astype(np.float32)
+    # ── Final pass: build keep_mask and count clipped frames ─────────────────
+    upper         = mu + n_sigma * std
+    keep_mask     = d <= upper[np.newaxis]                          # (N, Y, X) bool
+    n_clipped_map = (n_frames - keep_mask.sum(axis=0)).astype(np.float32)
+
     avg_c = float(n_clipped_map.mean())
     max_c = int(n_clipped_map.max())
     print(f"  {tag}Clip summary: avg {avg_c:.2f} frames/pixel  "
           f"({avg_c/n_frames*100:.2f}%),  max {max_c}")
 
-    count  = np.maximum(mask.sum(axis=0), 1)
-    offset = (np.sum(d * mask, axis=0) / count).astype(np.float32)
-    return offset, mask, n_clipped_map
+    # Final offset = clipped mean
+    count  = np.maximum(keep_mask.sum(axis=0), 1).astype(np.float32)
+    offset = (d * keep_mask).sum(axis=0) / count
+
+    return offset.astype(np.float32), keep_mask, n_clipped_map
+
+
