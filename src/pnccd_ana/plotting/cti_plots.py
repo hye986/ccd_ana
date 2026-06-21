@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 
 from .common import _cb, _stats_box, _build_grade_palette, _build_group_label
 from .gain_plots import plot_rough_gain, plot_pixel_gain_map
-from .spectrum_plots import plot_final_spectrum
+from .spectrum_plots import plot_final_spectrum, _compute_cti_check_data
 from ..physics.gain import (RoughGainResult, ColumnGainResult,
                              PeakFitResult, fit_peak, MN_KALPHA_EV, MN_KBETA_EV)
 from ..physics.cti import CtiResult, CtiCalibrator
