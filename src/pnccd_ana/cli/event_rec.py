@@ -136,6 +136,9 @@ def _make_worker(cal: dict,
                  asic_slices: dict | None = None):
     """
     Return a closure suitable for process_frames_mt for single-hybrid mode.
+
+    bad_pixel_mask is now forwarded to _correct_frame so that bad pixels
+    are excluded from the CM median (matching ROOT HCommonModeMedian).
     """
     import threading
     _lock = threading.Lock()
@@ -144,9 +147,11 @@ def _make_worker(cal: dict,
                 frame_indices: np.ndarray) -> np.ndarray:
         chunk_events: list[np.ndarray] = []
         for frame in raw_chunk:
-            corrected = _correct_frame(frame, cal, asic_slices=asic_slices)
+            # Pass bad_pixel_mask so CM excludes bad pixels
+            corrected = _correct_frame(frame, cal,
+                                       asic_slices=asic_slices,
+                                       bad_pixel_mask=bad_pixel_mask)
 
-            # Collect sample frames for raw spectrum (cheap copy of one frame)
             if sample_buf is not None:
                 with _lock:
                     if len(sample_buf) < sample_max:
