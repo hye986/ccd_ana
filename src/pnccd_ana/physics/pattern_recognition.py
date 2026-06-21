@@ -248,47 +248,39 @@ def _find_clusters(sec_mask: np.ndarray) -> np.ndarray:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _classify_cluster(ys: np.ndarray,
-                      xs: np.ndarray) -> tuple[int, int, int]:
+                      xs: np.ndarray,
+                      seed_idx: int) -> int:
     """
-    Classify cluster shape, trying every pixel as seed candidate.
+    Classify cluster shape using the argmax pixel as seed.
 
-    ROOT uses seed = argmax(ADU), but for nearly-equal charge-sharing
-    events thermal noise randomly shifts which pixel is maximum, causing
-    the frozenset of offsets to change and mis-classifying the event as
-    GRADE_OTHER.
+    The grade is determined by the frozenset of (dY, dX) offsets of all
+    other pixels relative to the seed (argmax) pixel.  This matches ROOT
+    which uses the pixel with maximum ADU as the seed.
 
-    Mitigation: try all pixels as seed.  If any candidate yields a known
-    grade, use that grade with the argmax pixel as the reported seed
-    position.  This recovers correctly-shaped clusters whose argmax seed
-    happens to give an unrecognised offset set due to noise.
+    If the argmax seed gives GRADE_OTHER, we do NOT try other seeds —
+    the shape is genuinely unrecognised.  The multi-seed fallback was
+    incorrect: for a 2×2 quadruple it always returned grade 9 regardless
+    of which corner was the true argmax, making grades 10/11/12 impossible.
 
     Parameters
     ----------
-    ys : int array — Y coordinates of all cluster pixels
-    xs : int array — X coordinates of all cluster pixels
+    ys       : int array — Y coordinates of all cluster pixels
+    xs       : int array — X coordinates of all cluster pixels
+    seed_idx : int — index of the argmax (seed) pixel in ys/xs
 
     Returns
     -------
-    grade    : int — grade ID or GRADE_OTHER
-    seed_pos : int — index into ys/xs of the argmax seed
-               (caller already computed this; we return it unchanged)
+    grade : int — from _GRADE_LOOKUP or GRADE_OTHER
     """
-    n = len(ys)
+    sy = ys[seed_idx]
+    sx = xs[seed_idx]
 
-    # Try each pixel as seed and collect all offset frozensets
-    for seed_candidate in range(n):
-        dy = ys - ys[seed_candidate]
-        dx = xs - xs[seed_candidate]
-        offsets = frozenset(
-            (int(dy[j]), int(dx[j]))
-            for j in range(n)
-            if not (dy[j] == 0 and dx[j] == 0)
-        )
-        grade = _GRADE_LOOKUP.get(offsets, GRADE_OTHER)
-        if grade != GRADE_OTHER:
-            return grade
-
-    return GRADE_OTHER
+    neighbours = frozenset(
+        (int(ys[j] - sy), int(xs[j] - sx))
+        for j in range(len(ys))
+        if j != seed_idx
+    )
+    return _GRADE_LOOKUP.get(neighbours, GRADE_OTHER)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -398,6 +390,13 @@ def find_events(
     if not primary_labels:
         return np.empty(0, dtype=EVENT_DTYPE)
 
+        # ── Cluster IDs that contain ≥1 primary pixel ─────────────────────────────
+    primary_labels = set(
+        int(v) for v in np.unique(label_map[prim_mask]) if v > 0
+    )
+    if not primary_labels:
+        return np.empty(0, dtype=EVENT_DTYPE)
+
     # ── Process each accepted cluster ─────────────────────────────────────────
     rows_l:   list[int]   = []
     cols_l:   list[int]   = []
@@ -418,8 +417,11 @@ def find_events(
         sx       = int(xs[seed_idx])
         seed_val = float(vals[seed_idx])
 
-        # ── Shape classification with multi-seed fallback ─────────────────────
-        grade = _classify_cluster(ys, xs)
+        # ── Shape classification using argmax seed ────────────────────────────
+        # Grade is determined by offsets relative to the argmax pixel.
+        # Matches ROOT HStepFilterEvents4 which uses the pixel with maximum
+        # ADU as the reference for pattern classification.
+        grade = _classify_cluster(ys, xs, seed_idx)
 
         if reject_extra and grade == GRADE_OTHER:
             continue

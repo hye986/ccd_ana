@@ -16,11 +16,9 @@ Resulting cm_map shape: (n_frames, n_Y, n_asics)
 
 Overflow/underflow handling
 ---------------------------
-Raw ADC sentinel values (underflow=0, overflow=2^n_bits - 1) are excluded
-from the CM median, matching ROOT HCommonModeMedian behaviour which sets
-bad/excluded pixels to +inf before nth_element so they never enter the
-median count.  The same exclusion applies during dark calibration
-(apply_common_mode_correction).
+Raw ADC sentinel values (underflow=0, overflow=2^n_bits-1) are excluded
+from the CM median, matching ROOT HCommonModeMedian which sets bad/excluded
+pixels to +inf before nth_element so they never enter the median count.
 """
 
 from __future__ import annotations
@@ -29,78 +27,93 @@ import numpy as np
 
 from ..io.geometry import ASIC_WIDTH
 
-# Default 16-bit ADC sentinel values (matching ROOT HFrameSource defaults)
+# Default 16-bit ADC sentinel values
 _ADC_BITS        = 16
-_UNDERFLOW_VALUE = np.uint16(0)
-_OVERFLOW_VALUE  = np.uint16((1 << _ADC_BITS) - 1)   # 65535
+_UNDERFLOW_VALUE = 0
+_OVERFLOW_VALUE  = (1 << _ADC_BITS) - 1   # 65535
 
 
 def _masked_median_axis1(data: np.ndarray,
-                         bad: np.ndarray | None) -> np.ndarray:
+                         bad:  np.ndarray | None) -> np.ndarray:
     """
     Compute median along axis=1 (columns) for each row, excluding bad pixels.
 
-    Matches ROOT HCommonModeMedian: bad pixels are set to +inf before the
-    partial sort so they never contribute to the median count.
+    Matches ROOT HCommonModeMedian: bad pixels set to +inf before partial
+    sort so they never contribute to the median count.
+
+    Uses fully vectorised numpy — no Python row loops.
 
     Parameters
     ----------
-    data : float32 (n_Y, n_cols) — one ASIC or full row per call
-    bad  : bool   (n_Y, n_cols) or None — True = exclude from median
+    data : float32 (n_Y, n_cols)
+    bad  : bool   (n_Y, n_cols) or None — True = exclude
 
     Returns
     -------
     medians : float32 (n_Y,)
     """
     if bad is None:
-        # Fast path: no exclusions, pure numpy
+        # Fast path: no exclusions — single numpy call
         return np.median(data, axis=1).astype(np.float32)
 
-    # Slow path: per-row masked median
-    # Copy so we do not modify caller's array
+    # Masked path: set excluded pixels to +inf then use partition
+    # np.partition is O(n) per row — much faster than sort
     buf = data.astype(np.float32, copy=True)
-    buf[bad] = np.inf                           # excluded → +inf (ROOT style)
+    buf[bad] = np.inf
 
     n_Y, n_cols = buf.shape
-    medians = np.empty(n_Y, dtype=np.float32)
 
-    for row in range(n_Y):
-        row_vals = buf[row]                     # view
-        finite   = row_vals[np.isfinite(row_vals)]
-        if finite.size == 0:
-            medians[row] = np.nan
-        else:
-            medians[row] = np.median(finite)    # numpy median on finite subset
+    # Count finite pixels per row — vectorised
+    n_good = np.isfinite(buf).sum(axis=1)   # (n_Y,)  int
 
-    return medians
+    # Sort only the finite portion using partition trick:
+    # partition to position n_good//2 gives us the lower median element,
+    # and n_good//2 - 1 gives upper for even counts.
+    # We do a full sort here because n_cols is small (64 per ASIC)
+    # and np.sort on (n_Y, 64) is fast.
+    sorted_buf = np.sort(buf, axis=1)       # (n_Y, n_cols) — inf at right end
+
+    # Lower median index per row
+    lo = n_good // 2                        # (n_Y,)
+    hi = np.maximum(lo - 1, 0)             # (n_Y,) for even-count correction
+
+    rows = np.arange(n_Y)
+    lower = sorted_buf[rows, lo]            # (n_Y,)
+    upper = sorted_buf[rows, hi]            # (n_Y,)
+
+    # Even n_good: average two middle values; odd: lower == result
+    even_mask = (n_good > 0) & ((n_good & 1) == 0)
+    medians   = np.where(even_mask, (lower + upper) * 0.5, lower)
+
+    # Rows with no good pixels → NaN
+    medians = np.where(n_good == 0, np.nan, medians)
+
+    return medians.astype(np.float32)
 
 
-def _make_bad_mask(residual: np.ndarray,
-                   bad_pixel_mask: np.ndarray | None,
+def _make_bad_mask(bad_pixel_mask: np.ndarray | None,
                    overflow_mask:  np.ndarray | None,
                    underflow_mask: np.ndarray | None) -> np.ndarray | None:
     """
     Combine static bad-pixel mask with per-frame overflow/underflow masks.
 
-    Returns None when no exclusions are needed (fast path).
+    Returns None when no exclusions needed (triggers fast path).
     """
     bad: np.ndarray | None = None
 
     if bad_pixel_mask is not None:
         bad = bad_pixel_mask.astype(bool, copy=True)
-
     if overflow_mask is not None:
-        bad = overflow_mask if bad is None else (bad | overflow_mask)
-
+        bad = overflow_mask.astype(bool) if bad is None else (bad | overflow_mask)
     if underflow_mask is not None:
-        bad = underflow_mask if bad is None else (bad | underflow_mask)
+        bad = underflow_mask.astype(bool) if bad is None else (bad | underflow_mask)
 
     return bad
 
 
 def cm_correct_frame_per_asic(
-        residual: np.ndarray,
-        asic_slices: dict[str, tuple[int, int, int, int]],
+        residual:       np.ndarray,
+        asic_slices:    dict[str, tuple[int, int, int, int]],
         bad_pixel_mask: np.ndarray | None = None,
         overflow_mask:  np.ndarray | None = None,
         underflow_mask: np.ndarray | None = None,
@@ -108,57 +121,54 @@ def cm_correct_frame_per_asic(
     """
     Apply CM correction to a single 2-D residual frame (Y, X) per ASIC.
 
-    Bad pixels (bad_pixel_mask), overflow pixels, and underflow pixels are
-    excluded from the median computation (set to +inf before median, matching
-    ROOT HCommonModeMedian behaviour).  The CM value is still subtracted from
-    ALL pixels in the ASIC row including bad ones — matching ROOT which
-    subtracts the median from the whole segment regardless.
+    Bad pixels, overflow, and underflow are excluded from the median
+    (set to +inf before sort, matching ROOT HCommonModeMedian).
+    The CM value is subtracted from ALL pixels including bad ones —
+    matching ROOT which subtracts median from the whole segment.
 
     Parameters
     ----------
-    residual        : float32 (n_Y, n_X)  — offset-subtracted frame
-    asic_slices     : dict mapping ASIC name to (Y0, Y1, X0, X1) bounds
-    bad_pixel_mask  : bool   (n_Y, n_X) or None — True = bad (static)
-    overflow_mask   : bool   (n_Y, n_X) or None — True = overflow this frame
-    underflow_mask  : bool   (n_Y, n_X) or None — True = underflow this frame
+    residual        : float32 (n_Y, n_X)
+    asic_slices     : dict mapping ASIC name to (Y0, Y1, X0, X1)
+    bad_pixel_mask  : bool (n_Y, n_X) or None
+    overflow_mask   : bool (n_Y, n_X) or None
+    underflow_mask  : bool (n_Y, n_X) or None
 
     Returns
     -------
     corrected  : float32 (n_Y, n_X)
-    cm_values  : float32 (n_Y, n_asics) — CM subtracted from each ASIC
-    asic_names : ndarray of ASIC name strings in sorted order
+    cm_values  : float32 (n_Y, n_asics)
+    asic_names : ndarray of ASIC name strings
     """
-    n_Y    = residual.shape[0]
+    n_Y     = residual.shape[0]
     n_asics = len(asic_slices)
     cm_values = np.zeros((n_Y, n_asics), dtype=np.float32)
     corrected = residual.astype(np.float32, copy=True)
 
     # Build combined bad mask once for the whole frame
-    bad_full = _make_bad_mask(residual, bad_pixel_mask,
-                              overflow_mask, underflow_mask)
+    bad_full = _make_bad_mask(bad_pixel_mask, overflow_mask, underflow_mask)
 
     asic_names = sorted(asic_slices.keys())
     for i, name in enumerate(asic_names):
         _, _, x0, x1 = asic_slices[name]
 
         asic_data = residual[:, x0:x1].astype(np.float32)
+        bad_asic  = bad_full[:, x0:x1] if bad_full is not None else None
 
-        bad_asic = bad_full[:, x0:x1] if bad_full is not None else None
+        cm_col = _masked_median_axis1(asic_data, bad_asic)   # (n_Y,)
 
-        cm_values[:, i] = _masked_median_axis1(asic_data, bad_asic)
+        # NaN CM (all-bad row) → subtract 0
+        cm_safe = np.where(np.isfinite(cm_col), cm_col, 0.0).astype(np.float32)
 
-        # Subtract CM from ALL pixels in this ASIC (including bad ones),
-        # replacing NaN CM with 0 so bad rows are not further corrupted
-        cm_col = np.where(np.isfinite(cm_values[:, i]),
-                          cm_values[:, i], 0.0).astype(np.float32)
-        corrected[:, x0:x1] = asic_data - cm_col[:, np.newaxis]
+        cm_values[:, i]    = cm_col
+        corrected[:, x0:x1] = asic_data - cm_safe[:, np.newaxis]
 
     return corrected, cm_values, np.array(asic_names)
 
 
 def cm_correct_frame(
-        residual: np.ndarray,
-        asic_slices: dict[str, tuple[int, int, int, int]] | None = None,
+        residual:       np.ndarray,
+        asic_slices:    dict[str, tuple[int, int, int, int]] | None = None,
         bad_pixel_mask: np.ndarray | None = None,
         overflow_mask:  np.ndarray | None = None,
         underflow_mask: np.ndarray | None = None,
@@ -166,21 +176,17 @@ def cm_correct_frame(
     """
     Apply CM correction to a single 2-D residual frame (Y, X).
 
-    If asic_slices is provided, computes CM per ASIC (recommended for
-    multi-ASIC detectors with independent baselines).
-    Otherwise falls back to legacy per-row CM (all X columns), which
-    matches ROOT HCommonModeMedian with NADCs=1.
-
-    Bad pixels, overflow, and underflow are excluded from the median
-    (set to +inf before nth_element, matching ROOT exactly).
+    If asic_slices is provided, computes CM per ASIC.
+    Otherwise falls back to per-row CM (all X columns) matching ROOT
+    HCommonModeMedian with NADCs=1.
 
     Parameters
     ----------
-    residual        : float32 (n_Y, n_X)  — offset-subtracted frame
-    asic_slices     : optional dict mapping ASIC name to (Y0, Y1, X0, X1)
-    bad_pixel_mask  : bool   (n_Y, n_X) or None — True = bad (static)
-    overflow_mask   : bool   (n_Y, n_X) or None — True = overflow this frame
-    underflow_mask  : bool   (n_Y, n_X) or None — True = underflow this frame
+    residual        : float32 (n_Y, n_X)
+    asic_slices     : optional ASIC geometry
+    bad_pixel_mask  : bool (n_Y, n_X) or None
+    overflow_mask   : bool (n_Y, n_X) or None
+    underflow_mask  : bool (n_Y, n_X) or None
 
     Returns
     -------
@@ -197,14 +203,12 @@ def cm_correct_frame(
         )
 
     # Legacy: CM over all X columns per row
-    bad_full = _make_bad_mask(residual, bad_pixel_mask,
-                              overflow_mask, underflow_mask)
-    cm = _masked_median_axis1(
+    bad_full = _make_bad_mask(bad_pixel_mask, overflow_mask, underflow_mask)
+    cm       = _masked_median_axis1(
         residual.astype(np.float32), bad_full
     )
-    # Replace NaN CM (all-bad row) with 0
-    cm_safe = np.where(np.isfinite(cm), cm, 0.0).astype(np.float32)
-    corrected = (residual.astype(np.float32) - cm_safe[:, np.newaxis])
+    cm_safe  = np.where(np.isfinite(cm), cm, 0.0).astype(np.float32)
+    corrected = residual.astype(np.float32) - cm_safe[:, np.newaxis]
     return corrected, cm.astype(np.float32), None
 
 
@@ -219,21 +223,18 @@ def apply_common_mode_correction(
     """
     Subtract per-pixel offset then apply CM correction to a stack of frames.
 
-    Overflow and underflow pixels (raw ADC sentinels) are detected from the
-    raw integer data BEFORE offset subtraction and excluded from the CM
-    median, matching ROOT HStepOffNoiMapHLL behaviour.
+    Overflow/underflow pixels are detected from raw integer data BEFORE
+    offset subtraction and excluded from the CM median, matching ROOT
+    HStepOffNoiMapHLL.
 
     Parameters
     ----------
-    data            : uint16 or float32 (n_frames, n_Y, n_X) — raw or
-                      already-cast frames.  Overflow/underflow detection
-                      works on integer values; if float32 is passed the
-                      sentinel check is skipped.
-    offset          : float32 (n_Y, n_X) — offset map
+    data            : uint16 or float32 (n_frames, n_Y, n_X)
+    offset          : float32 (n_Y, n_X)
     label           : tag for diagnostic prints
     asic_slices     : optional ASIC geometry
-    bad_pixel_mask  : bool (n_Y, n_X) or None — static bad-pixel map
-    n_bits          : ADC bit depth for sentinel detection (default 16)
+    bad_pixel_mask  : bool (n_Y, n_X) or None
+    n_bits          : ADC bit depth (default 16)
 
     Returns
     -------
@@ -244,21 +245,19 @@ def apply_common_mode_correction(
     tag = f"[{label}] " if label else ""
     print(f"  {tag}Applying CM correction …")
 
-    underflow_val = 0
-    overflow_val  = (1 << n_bits) - 1   # 65535 for 16-bit
+    overflow_val  = (1 << n_bits) - 1
 
-    n_frames = data.shape[0]
-
-    # Detect overflow/underflow from integer raw values if available
+    # Detect overflow/underflow from integer raw values before offset subtract
     if np.issubdtype(data.dtype, np.integer):
         overflow_stack  = (data == overflow_val)   # (N, Y, X) bool
-        underflow_stack = (data == underflow_val)
+        underflow_stack = (data == 0)
     else:
-        # float input — sentinel detection not possible, skip
         overflow_stack  = None
         underflow_stack = None
 
     residual = (data.astype(np.float32) - offset[np.newaxis])
+
+    n_frames = data.shape[0]
 
     if asic_slices:
         asic_names = sorted(asic_slices.keys())
@@ -268,27 +267,26 @@ def apply_common_mode_correction(
         corrected  = np.empty_like(residual)
 
         for f in range(n_frames):
-            of  = overflow_stack[f]  if overflow_stack  is not None else None
-            uf  = underflow_stack[f] if underflow_stack is not None else None
+            of = overflow_stack[f]  if overflow_stack  is not None else None
+            uf = underflow_stack[f] if underflow_stack is not None else None
             corr_f, cm_f, _ = cm_correct_frame_per_asic(
                 residual[f], asic_slices,
                 bad_pixel_mask=bad_pixel_mask,
                 overflow_mask=of,
                 underflow_mask=uf,
             )
-            corrected[f]  = corr_f
-            cm_map[f]     = cm_f
+            corrected[f] = corr_f
+            cm_map[f]    = cm_f
 
         return corrected, cm_map, asic_names
 
     else:
-        # Legacy: per-row CM over all columns
         cm_map    = np.zeros((n_frames, data.shape[1]), dtype=np.float32)
         corrected = np.empty_like(residual)
 
         for f in range(n_frames):
-            of  = overflow_stack[f]  if overflow_stack  is not None else None
-            uf  = underflow_stack[f] if underflow_stack is not None else None
+            of = overflow_stack[f]  if overflow_stack  is not None else None
+            uf = underflow_stack[f] if underflow_stack is not None else None
             corr_f, cm_f, _ = cm_correct_frame(
                 residual[f], asic_slices=None,
                 bad_pixel_mask=bad_pixel_mask,
@@ -302,9 +300,9 @@ def apply_common_mode_correction(
 
 
 def compute_cm_noise(
-        cm_map:      np.ndarray,
-        label:       str = "",
-        asic_names:  list[str] | None = None,
+        cm_map:     np.ndarray,
+        label:      str = "",
+        asic_names: list[str] | None = None,
 ) -> np.ndarray | dict[str, np.ndarray]:
     """
     CM noise = per-Y RMS of the CM correction values across frames.
@@ -322,10 +320,9 @@ def compute_cm_noise(
     print(f"  {tag}CM noise …")
 
     if asic_names and cm_map.ndim == 3:
-        result = {}
-        for i, name in enumerate(asic_names):
-            result[name] = np.std(cm_map[:, :, i], axis=0,
-                                  ddof=1).astype(np.float32)
-        return result
+        return {
+            name: np.std(cm_map[:, :, i], axis=0, ddof=1).astype(np.float32)
+            for i, name in enumerate(asic_names)
+        }
 
     return np.std(cm_map, axis=0, ddof=1).astype(np.float32)

@@ -123,6 +123,53 @@ def _build_bad_pixel_mask(
 # Per-chunk worker (single-hybrid)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _correct_frame(raw: np.ndarray,
+                   cal: dict,
+                   asic_slices: dict | None = None,
+                   bad_pixel_mask: np.ndarray | None = None,
+                   n_bits: int = 16) -> np.ndarray:
+    """
+    Offset subtract + CM correct one raw frame.
+
+    Overflow and underflow sentinel values are detected from the raw
+    integer frame BEFORE offset subtraction and excluded from the CM
+    median, matching ROOT HCommonModeMedian which sets bad/overflow pixels
+    to +inf before nth_element.
+
+    Parameters
+    ----------
+    raw            : uint16 (n_Y, n_X) — raw ADC frame
+    cal            : calibration dict with cal["global"]["offset"]
+    asic_slices    : ASIC geometry for per-ASIC CM (None = full-row CM)
+    bad_pixel_mask : bool (n_Y, n_X) or None — static bad pixels
+    n_bits         : ADC bit depth (default 16)
+
+    Returns
+    -------
+    corrected : float32 (n_Y, n_X)
+    """
+    overflow_val = (1 << n_bits) - 1   # 65535 for 16-bit
+
+    # Detect sentinels on raw integer values BEFORE any arithmetic
+    if np.issubdtype(raw.dtype, np.integer):
+        overflow_mask  = (raw == overflow_val)
+        underflow_mask = (raw == 0)
+    else:
+        overflow_mask  = None
+        underflow_mask = None
+
+    full = raw.astype(np.float32) - cal["global"]["offset"]
+
+    corrected, _, _ = cm_correct_frame(
+        full,
+        asic_slices=asic_slices,
+        bad_pixel_mask=bad_pixel_mask,
+        overflow_mask=overflow_mask,
+        underflow_mask=underflow_mask,
+    )
+    return corrected
+
+
 def _make_worker(cal: dict,
                  asics: list[str] | None,
                  noise_map: np.ndarray,
@@ -137,7 +184,7 @@ def _make_worker(cal: dict,
     """
     Return a closure suitable for process_frames_mt for single-hybrid mode.
 
-    bad_pixel_mask is now forwarded to _correct_frame so that bad pixels
+    bad_pixel_mask is forwarded to _correct_frame so that bad pixels
     are excluded from the CM median (matching ROOT HCommonModeMedian).
     """
     import threading
@@ -147,7 +194,6 @@ def _make_worker(cal: dict,
                 frame_indices: np.ndarray) -> np.ndarray:
         chunk_events: list[np.ndarray] = []
         for frame in raw_chunk:
-            # Pass bad_pixel_mask so CM excludes bad pixels
             corrected = _correct_frame(frame, cal,
                                        asic_slices=asic_slices,
                                        bad_pixel_mask=bad_pixel_mask)
@@ -169,18 +215,6 @@ def _make_worker(cal: dict,
             return np.concatenate(chunk_events)
         return np.empty(0, dtype=EVENT_DTYPE)
     return _worker
-
-
-def _correct_frame(raw: np.ndarray, cal: dict,
-                   asic_slices: dict | None = None) -> np.ndarray:
-    """
-    Offset subtract + CM correct one raw frame for single-hybrid.
-    
-    If asic_slices is provided, CM correction is applied per-ASIC.
-    """
-    full = raw.astype(np.float32) - cal["global"]["offset"]
-    corrected, _, _ = cm_correct_frame(full, asic_slices=asic_slices)
-    return corrected
 
 
 # ──────────────────────────────────────────────────────────────────────────────
