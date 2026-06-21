@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from .common import _cb, _stats_box, _build_grade_palette, _build_group_label
 from ..physics.gain import (RoughGainResult, ColumnGainResult,
                              PeakFitResult, fit_peak, MN_KALPHA_EV, MN_KBETA_EV,
-                             _gaussian)
+                             _gaussian, SINGLE_GRADES)
 
 
 def plot_rough_gain(rough: RoughGainResult,
