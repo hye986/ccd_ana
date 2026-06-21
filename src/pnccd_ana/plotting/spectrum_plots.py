@@ -14,7 +14,8 @@ import matplotlib.pyplot as plt
 
 from .common import _cb, _stats_box, _build_grade_palette, _build_group_label
 from ..physics.gain import (RoughGainResult, PeakFitResult, fit_peak,
-                             MN_KALPHA_EV, MN_KBETA_EV, _gaussian)
+                             MN_KALPHA_EV, MN_KBETA_EV, _gaussian,
+                             SINGLE_GRADES, SPLIT_GRADES)
 
 
 def plot_final_spectrum(events: np.ndarray,
