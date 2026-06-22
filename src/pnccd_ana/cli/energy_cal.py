@@ -254,6 +254,30 @@ def run(cfg: Config) -> dict:
             mean_cti = float(np.mean(1.0 - cte_row1[good_cols]))
             print(f"  Mean CTI (row=1, good columns): {mean_cti:.3e}")
 
+    # ── Spectrum plots and resolution fit ─────────────────────────────────────
+    # Always compute resolution fit (result saved to HDF5 even without plots)
+    from ..plotting.spectrum_plots import plot_final_spectrum
+    fit_result = plot_final_spectrum(
+        grades      = grades,
+        energy_sum  = energy_sum,
+        out_dir     = out_dir,
+        target_ev   = calib_energy,
+        window_frac = float(ec.get("fit_window_frac", 0.12)),
+        with_bg     = bool(ec.get("spectrum_with_bg", False)),
+        e_min       = ec.get("spectrum_e_min"),
+        e_max       = ec.get("spectrum_e_max"),
+        n_bins      = int(ec.get("spectrum_n_bins", 400)),
+    ) if save_plots else {"success": False, "peak_ev": 0.0,
+                          "fwhm_ev": 0.0, "sigma_ev": 0.0,
+                          "resolution": 0.0, "n_events": 0}
+
+    if fit_result["success"]:
+        print(f"\n  ✓ Mn Kα resolution: "
+              f"FWHM = {fit_result['fwhm_ev']:.2f} eV  "
+              f"R = {fit_result['resolution']:.3f}%")
+    else:
+        print(f"\n  ⚠  Resolution fit failed: {fit_result.get('message','')}")
+
     # ── Save calibration ──────────────────────────────────────────────────────
     print(f"\nSaving calibration: {output_path}")
     save_energy_cal_h5(
@@ -275,10 +299,17 @@ def run(cfg: Config) -> dict:
             "n_outer_iter":    n_outer_iter,
             "n_rows":          n_rows,
             "n_cols":          n_cols,
+            # Resolution fit results saved as metadata scalars
+            "kalpha_peak_ev":    fit_result.get("peak_ev",    0.0),
+            "kalpha_fwhm_ev":    fit_result.get("fwhm_ev",    0.0),
+            "kalpha_sigma_ev":   fit_result.get("sigma_ev",   0.0),
+            "kalpha_resolution": fit_result.get("resolution",  0.0),
+            "kalpha_n_events":  fit_result.get("n_events",   0),
+            "kalpha_fit_ok":    int(fit_result.get("success", False)),
         },
     )
 
-    # ── Plots ─────────────────────────────────────────────────────────────────
+    # ── Other plots (gain, CTE) ───────────────────────────────────────────────
     if save_plots and cte_result is not None:
         print("\nGenerating plots …")
         plot_gain_map(gain_map, cte_result.bad_gain_map, out_dir)

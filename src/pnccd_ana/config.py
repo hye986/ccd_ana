@@ -138,6 +138,12 @@ _DEFAULTS: dict[str, Any] = {
         "cte_relax":       0.5,         # ROOT relaxation factor
         "max_cte_iter":    10,          # ROOT max inner CTE iterations
         "save_plots":      True,
+        # Final spectrum and resolution fit
+        "fit_window_frac":  0.12,    # Kα fit window = target_ev × (1 ± frac)
+        "spectrum_with_bg": False,   # include constant background in Gaussian fit
+        "spectrum_e_min":   None,    # energy axis lower bound [eV] (None = auto)
+        "spectrum_e_max":   None,    # energy axis upper bound [eV] (None = auto)
+        "spectrum_n_bins":  400,     # histogram bins for final spectrum
     },
 }
 
@@ -422,7 +428,20 @@ energy_cal:
                                     #   cte_map.png         — 2D cumulative CTE
                                     #   cti_summary.png     — CTI per column + histogram
                                     #   signal_vs_row.png   — CTI effect visualisation
-                                    #   grade_spectrum.png  — spectrum by grade
+                                    #   cal_spectrum_by_grade.png         — spectrum by grade
+                                    #   cal_spectrum_resolution_all_grades.png  — Kα fit (all grades)
+                                    #   cal_spectrum_resolution_grades_[0].png — Kα fit (singles only)
+
+  # ── Final spectrum and resolution fit ──────────────────────────────────────
+  fit_window_frac: 0.12            # Mn Kα fit window: target_ev × (1 ± frac)
+                                    # 0.12 = ±12% around 5898 eV = [5190, 6606] eV
+                                    # tighten if Kβ leaks into the window
+  spectrum_with_bg: false           # add constant background term to Gaussian fit
+                                    # use true if there is a significant continuum
+                                    # under the Kα peak
+  spectrum_e_min: null              # energy axis lower bound [eV] (null = auto)
+  spectrum_e_max: null              # energy axis upper bound [eV] (null = auto)
+  spectrum_n_bins: 400              # histogram bins for final spectrum plots
 """
 
 
