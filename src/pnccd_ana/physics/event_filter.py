@@ -148,28 +148,6 @@ def find_events(
 
     Returns full per-pixel cluster data in CSR format.
     No grade assignment — deferred to calibrate.py.
-
-    Parameters
-    ----------
-    corrected          : float32 (n_Y, n_X) — CM-corrected frame
-    noise_map          : float32 (n_Y, n_X) — per-pixel noise [ADU RMS]
-    search_mask        : bool (n_Y, n_X) or None — True = active pixel
-    seed_sigma         : primary threshold   (ROOT ThresPrm, typ. 5)
-    split_sigma        : secondary threshold (ROOT ThresSec, typ. 3)
-    bad_pixel_mask     : bool (n_Y, n_X) or None
-    clamp_sec_to_prim  : clamp sec threshold to prim per pixel (ROOT)
-    flag_border        : attach FLAG_BORDER to edge-touching clusters
-
-    Returns
-    -------
-    dict with keys:
-        pixel_Y   : int16  (n_pixels_total,) — Y of each cluster pixel
-        pixel_X   : int16  (n_pixels_total,) — X of each cluster pixel
-        pixel_adu : float32(n_pixels_total,) — ADU of each cluster pixel
-        offsets   : int64  (n_events+1,)     — CSR offsets
-        flag      : uint8  (n_events,)        — per-event flag bitmask
-
-    Empty result: all arrays have length 0 (offsets has length 1 = [0]).
     """
     frame = np.ascontiguousarray(corrected, dtype=np.float32)
     noise = np.ascontiguousarray(noise_map, dtype=np.float32)
@@ -203,50 +181,63 @@ def find_events(
     prim_mask = frame > prim_thr
     sec_mask  = frame > sec_thr
 
-    # ── Empty frame fast-path ─────────────────────────────────────────────────
     if not sec_mask.any():
         return _empty_result()
 
     # ── Clustering ────────────────────────────────────────────────────────────
     label_map = _find_clusters(sec_mask)
 
-    primary_labels = set(
-        int(v) for v in np.unique(label_map[prim_mask]) if v > 0
-    )
-    if not primary_labels:
+    # Only keep clusters that contain at least one primary-threshold pixel
+    primary_labels = np.unique(label_map[prim_mask])
+    primary_labels = primary_labels[primary_labels > 0]
+
+    if len(primary_labels) == 0:
         return _empty_result()
 
-    # ── Build CSR output ──────────────────────────────────────────────────────
-    all_Y:   list[np.ndarray] = []
-    all_X:   list[np.ndarray] = []
-    all_adu: list[np.ndarray] = []
-    flags_l: list[int]        = []
-    offsets: list[int]        = [0]
+    # ── Vectorised CSR construction ───────────────────────────────────────────
+    # Build a boolean mask for all pixels belonging to accepted clusters.
+    # Uses np.isin on the full label_map — O(H*W), single C call.
+    accepted_mask = np.isin(label_map, primary_labels)
 
-    for cid in primary_labels:
-        pix_mask = label_map == cid
-        ys, xs   = np.nonzero(pix_mask)
-        vals     = frame[ys, xs]
+    # Flat indices of all accepted pixels
+    flat_idx  = np.flatnonzero(accepted_mask)
+    pix_Y     = (flat_idx // W).astype(np.int16)
+    pix_X     = (flat_idx  % W).astype(np.int16)
+    pix_adu   = frame.ravel()[flat_idx].astype(np.float32)
+    pix_label = label_map.ravel()[flat_idx]   # cluster ID per pixel
 
-        evt_flag = np.uint8(0)
-        if flag_border and border_mask[ys, xs].any():
-            evt_flag |= FLAG_BORDER
+    # Sort by cluster label so CSR offsets are contiguous
+    sort_idx  = np.argsort(pix_label, kind="stable")
+    pix_Y     = pix_Y[sort_idx]
+    pix_X     = pix_X[sort_idx]
+    pix_adu   = pix_adu[sort_idx]
+    pix_label = pix_label[sort_idx]
 
-        all_Y.append(ys.astype(np.int16))
-        all_X.append(xs.astype(np.int16))
-        all_adu.append(vals)
-        flags_l.append(int(evt_flag))
-        offsets.append(offsets[-1] + len(ys))
+    # Build CSR offsets from cluster label runs
+    # unique_labels are in sorted order; counts give cluster sizes
+    unique_labels, counts = np.unique(pix_label, return_counts=True)
+    n_events  = len(unique_labels)
+    offsets   = np.zeros(n_events + 1, dtype=np.int64)
+    np.cumsum(counts, out=offsets[1:])
 
-    if not all_Y:
-        return _empty_result()
+    # ── Per-event flag ────────────────────────────────────────────────────────
+    flags = np.zeros(n_events, dtype=np.uint8)
+    if flag_border:
+        # For each cluster, check if any pixel is on the border
+        # border_flat[pixel] = True if border pixel
+        border_flat = border_mask.ravel()[flat_idx][sort_idx]
+        # reduceat OR: use max (True=1 > False=0)
+        has_border  = np.maximum.reduceat(
+            border_flat.view(np.uint8), offsets[:-1].astype(np.intp)
+        ).astype(bool)
+        flags[has_border] |= FLAG_BORDER
 
     return {
-        "pixel_Y":   np.concatenate(all_Y).astype(np.int16),
-        "pixel_X":   np.concatenate(all_X).astype(np.int16),
-        "pixel_adu": np.concatenate(all_adu).astype(np.float32),
-        "offsets":   np.array(offsets, dtype=np.int64),
-        "flag":      np.array(flags_l, dtype=np.uint8),
+        "pixel_Y":   pix_Y,
+        "pixel_X":   pix_X,
+        "pixel_adu": pix_adu,
+        "offsets":   offsets,
+        "flag":      flags,
     }
 
 
@@ -266,20 +257,7 @@ def _empty_result() -> dict:
 
 def get_cluster(cluster_data: dict, event_idx: int) -> tuple[
         np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Return (pixel_Y, pixel_X, pixel_adu) for a single event.
-
-    Parameters
-    ----------
-    cluster_data : dict from find_events or load_clusters_h5
-    event_idx    : event index
-
-    Returns
-    -------
-    ys   : int16  (n_pixels,)
-    xs   : int16  (n_pixels,)
-    adus : float32(n_pixels,)
-    """
+    """Return (pixel_Y, pixel_X, pixel_adu) for a single event."""
     lo = int(cluster_data["offsets"][event_idx])
     hi = int(cluster_data["offsets"][event_idx + 1])
     return (cluster_data["pixel_Y"][lo:hi],
@@ -288,40 +266,75 @@ def get_cluster(cluster_data: dict, event_idx: int) -> tuple[
 
 
 def n_pixels_per_event(cluster_data: dict) -> np.ndarray:
-    """Return int32 array of cluster sizes (one per event)."""
+    """Return int32 array of cluster sizes — O(n_events), vectorised."""
     off = cluster_data["offsets"]
     return (off[1:] - off[:-1]).astype(np.int32)
+
+
+def adu_sums(cluster_data: dict) -> np.ndarray:
+    """
+    Return float32 total ADU per event — fully vectorised.
+
+    Uses np.add.reduceat which operates in C on the flat pixel array.
+    O(n_pixels_total), no Python loop.
+    """
+    adus = cluster_data["pixel_adu"]
+    off  = cluster_data["offsets"]
+    n    = len(off) - 1
+    if n == 0:
+        return np.empty(0, dtype=np.float32)
+    # reduceat needs start indices only (not the sentinel)
+    starts = off[:-1].astype(np.intp)
+    return np.add.reduceat(adus.astype(np.float64),
+                           starts).astype(np.float32)
 
 
 def seed_pixels(cluster_data: dict) -> tuple[
         np.ndarray, np.ndarray, np.ndarray]:
     """
-    Return (seed_Y, seed_X, seed_adu) for every event.
+    Return (seed_Y, seed_X, seed_adu) for every event — vectorised.
 
-    Seed = argmax ADU pixel within the cluster.
-    O(n_pixels_total) — single pass.
+    Seed = argmax ADU pixel within each cluster.
+    Uses a vectorised segment-argmax via np.maximum.reduceat.
+    O(n_pixels_total), no Python loop.
     """
-    n_events  = len(cluster_data["offsets"]) - 1
-    seed_Y    = np.empty(n_events, dtype=np.int16)
-    seed_X    = np.empty(n_events, dtype=np.int16)
-    seed_adu  = np.empty(n_events, dtype=np.float32)
-
-    for i in range(n_events):
-        ys, xs, adus = get_cluster(cluster_data, i)
-        best         = int(np.argmax(adus))
-        seed_Y[i]    = ys[best]
-        seed_X[i]    = xs[best]
-        seed_adu[i]  = adus[best]
-
-    return seed_Y, seed_X, seed_adu
-
-
-def adu_sums(cluster_data: dict) -> np.ndarray:
-    """Return float32 array of total ADU per event."""
-    off  = cluster_data["offsets"]
     adus = cluster_data["pixel_adu"]
+    ys   = cluster_data["pixel_Y"]
+    xs   = cluster_data["pixel_X"]
+    off  = cluster_data["offsets"]
     n    = len(off) - 1
-    out  = np.empty(n, dtype=np.float32)
-    for i in range(n):
-        out[i] = adus[off[i]:off[i+1]].sum()
-    return out
+
+    if n == 0:
+        return (np.empty(0, dtype=np.int16),
+                np.empty(0, dtype=np.int16),
+                np.empty(0, dtype=np.float32))
+
+    starts = off[:-1].astype(np.intp)
+
+    # Max ADU per cluster (vectorised)
+    max_adu = np.maximum.reduceat(adus, starts).astype(np.float32)
+
+    # For each pixel, does it equal the max of its cluster?
+    # Build a per-pixel cluster index to look up max_adu
+    # cluster_id[pixel] = which cluster this pixel belongs to
+    sizes      = (off[1:] - off[:-1]).astype(np.int32)   # (n,)
+    cluster_id = np.repeat(np.arange(n, dtype=np.int32), sizes)
+
+    is_max = (adus == max_adu[cluster_id])
+
+    # For each cluster, find the FIRST pixel that equals the max
+    # (ties broken by first occurrence = lowest index in cluster)
+    # We want one seed per cluster.
+    # Strategy: among pixels where is_max, keep only the first per cluster.
+    max_pix_idx = np.flatnonzero(is_max)   # global pixel indices of max pixels
+
+    # cluster_id at these positions
+    cid_at_max  = cluster_id[max_pix_idx]
+
+    # First occurrence per cluster: use np.unique with return_index
+    _, first_in_cid = np.unique(cid_at_max, return_index=True)
+    seed_pix_idx    = max_pix_idx[first_in_cid]   # global pixel index of seed
+
+    return (ys[seed_pix_idx].copy(),
+            xs[seed_pix_idx].copy(),
+            adus[seed_pix_idx].copy())

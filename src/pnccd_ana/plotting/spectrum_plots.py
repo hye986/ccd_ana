@@ -1,69 +1,73 @@
 """
 pnccd_ana.plotting.spectrum_plots
 ==================================
-Energy spectrum plotting functions.
+Final calibrated energy spectrum plot.
+
+Only imported by cli/energy_cal.py — never at offset or event_rec time.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from .common import _cb, _stats_box, _build_grade_palette, _build_group_label
-from ..physics.gain import (RoughGainResult, PeakFitResult, fit_peak,
-                             MN_KALPHA_EV, MN_KBETA_EV, _gaussian,
-                             SINGLE_GRADES, SPLIT_GRADES)
+from ..physics.gain      import MN_KALPHA_EV, MN_KBETA_EV, fit_peak
+from ..physics.calibrate import GRADE_NAMES, GRADE_OTHER, _GRADE_DEFS
 
 
-def plot_final_spectrum(events: np.ndarray,
-                         energy_ev: np.ndarray,
-                         out_dir: Path,
-                         target_ev: float) -> None:
+# ══════════════════════════════════════════════════════════════════════════════
+# Grade colour palette  (built locally — no import from common.py)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _grade_palette() -> dict[int, str]:
+    """Fixed colour per grade 0–13."""
+    cmap = plt.cm.get_cmap("tab20")
+    from ..physics.calibrate import N_GRADES
+    return {gid: cmap(gid / N_GRADES) for gid in range(N_GRADES)}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Final spectrum
+# ══════════════════════════════════════════════════════════════════════════════
+
+def plot_final_spectrum(
+        grades:      np.ndarray,
+        energy_sum:  np.ndarray,
+        out_dir:     Path,
+        target_ev:   float = MN_KALPHA_EV,
+) -> None:
     """
-    Calibrated energy spectrum for ALL grades with Kα resolution fit.
+    Calibrated energy spectrum for all grade groups with Kα resolution fit.
 
-    Grade groups, colours and labels are derived entirely from
-    _GRADE_DEFS + GRADE_OTHER at call time — adding or removing grades
-    in pattern_recognition.py automatically updates this plot.
+    Panel 1 (log)    : per-grade-group spectra
+    Panel 2 (linear) : all-grades sum + Gaussian fit to Kα peak
 
-    Panel 1 (log scale)  : per-grade-group spectra
-    Panel 2 (linear)     : all-grades sum with Gaussian fit to Kα peak
-                           → energy resolution FWHM and R = FWHM/E
+    Parameters
+    ----------
+    grades     : int8  (n_events,) — from assign_grades
+    energy_sum : float32 (n_events,) — from compute_final_energies [eV]
+    out_dir    : output directory
+    target_ev  : calibration line energy [eV]
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    out_dir = Path(out_dir)
+    palette = _grade_palette()
 
-    from ..physics.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
-    from ..plotting import _build_grade_palette, _build_group_label
-
-    # Both dicts are keyed by the *first* grade ID in each group.
-    # _build_grade_palette : grade_id → colour string
-    # _build_group_label   : first_grade_id_in_group → label string
-    palette     = _build_grade_palette()   # {grade_id: colour}
-    group_label = _build_group_label()     # {first_gid: label_str}
-
-    # Build ordered list of (group_key, [grade_ids], colour, label)
-    # by grouping _GRADE_DEFS entries by their label prefix, then appending
-    # GRADE_OTHER — identical logic to _build_group_label() so the two
-    # are always in sync.
+    # Group grades
     from collections import defaultdict
     prefix_to_gids: dict[str, list[int]] = defaultdict(list)
     for gid, label, _ in _GRADE_DEFS:
         prefix = label.split()[0]
         prefix_to_gids[prefix].append(gid)
 
-    # Ordered list of groups: [(first_gid, all_gids_in_group)]
-    groups: list[tuple[int, list[int]]] = []
+    groups: list[tuple[str, list[int]]] = []
     for prefix, gids in sorted(prefix_to_gids.items(),
                                 key=lambda kv: min(kv[1])):
-        gids_sorted = sorted(gids)
-        groups.append((gids_sorted[0], gids_sorted))
-    # Append the catch-all "other" group
-    groups.append((GRADE_OTHER, [GRADE_OTHER]))
+        groups.append((prefix, sorted(gids)))
+    groups.append(("other", [GRADE_OTHER]))
 
     # Energy axis
     lo      = target_ev * 0.60
@@ -75,28 +79,27 @@ def plot_final_spectrum(events: np.ndarray,
     fig.suptitle("Final Calibrated Fe-55 Spectrum — All Grades",
                  fontsize=13, fontweight="bold")
 
-    # ── Panel 1: per-group log scale ──────────────────────────────────────────
-    ax1 = axes[0]
-    all_counts = np.zeros(len(centres), dtype=np.float64)
+    # ── Panel 1: per-group log ────────────────────────────────────────────────
+    ax1         = axes[0]
+    all_counts  = np.zeros(len(centres), dtype=np.float64)
 
-    for first_gid, gids in groups:
-        mask = np.isin(events["grade"], gids)
+    for prefix, gids in groups:
+        mask = np.isin(grades, gids)
         if not mask.any():
             continue
-        e    = energy_ev[mask]
-        c, _ = np.histogram(e, bins=bins)
+        c, _  = np.histogram(energy_sum[mask], bins=bins)
         all_counts += c.astype(np.float64)
-
-        colour    = palette.get(first_gid, "#aaaaaa")
-        lbl       = group_label.get(first_gid, f"G{first_gid}")
-        n_ev      = int(mask.sum())
-        ax1.step(centres, c, where="mid", color=colour,
-                 lw=1.1, alpha=0.85,
-                 label=f"{lbl}  N={n_ev:,}")
+        colour = palette.get(gids[0], "#aaaaaa")
+        label  = (f"{GRADE_NAMES.get(gids[0], prefix).title()}"
+                  f" (g{gids[0]}–g{gids[-1]})"
+                  if len(gids) > 1
+                  else f"{GRADE_NAMES.get(gids[0], prefix).title()} (g{gids[0]})")
+        ax1.step(centres, c, where="mid", color=colour, lw=1.1, alpha=0.85,
+                 label=f"{label}  N={mask.sum():,}")
 
     ax1.step(centres, all_counts, where="mid", color="black",
              lw=1.3, ls="--", alpha=0.7,
-             label=f"All grades  N={len(events):,}")
+             label=f"All grades  N={len(grades):,}")
     ax1.axvline(target_ev,   color="red",  lw=1.2, ls="--",
                 label=f"Mn Kα {target_ev:.0f} eV")
     ax1.axvline(MN_KBETA_EV, color="blue", lw=1.2, ls="--",
@@ -108,56 +111,57 @@ def plot_final_spectrum(events: np.ndarray,
     ax1.legend(fontsize=7, ncol=2)
     ax1.grid(alpha=0.3)
 
-    # ── Panel 2: all-grades sum + Kα Gaussian fit ─────────────────────────────
+    # ── Panel 2: all-grades sum + Kα fit ─────────────────────────────────────
     ax2 = axes[1]
     ax2.step(centres, all_counts, where="mid", color="steelblue",
              lw=1.2, alpha=0.9,
-             label=f"All grades  N={len(events):,}")
+             label=f"All grades  N={len(grades):,}")
 
+    # Gaussian fit to Kα window
     fit_window = 0.12
-    res = fit_peak(energy_ev, nominal=target_ev,
-                   window_frac=fit_window, n_bins=150,
-                   min_events=50, with_bg=False)
+    lo_fit = target_ev * (1 - fit_window)
+    hi_fit = target_ev * (1 + fit_window)
+    mask_fit = (energy_sum > lo_fit) & (energy_sum < hi_fit)
+    res = fit_peak(energy_sum[mask_fit], lo_fit, hi_fit, n_params=3)
 
     if res.success:
-        fwhm   = 2.3548 * res.sigma_ev
-        resoln = fwhm / res.peak_ev * 100.0
+        from scipy.stats import norm as _norm
+        fwhm   = 2.3548 * res.sigma_adu
+        resoln = fwhm / res.peak_adu * 100.0
 
-        xs = np.linspace(target_ev * (1 - fit_window),
-                         target_ev * (1 + fit_window), 500)
-        ys = _gaussian(xs, res.amplitude, res.peak_ev, res.sigma_ev)
+        xs = np.linspace(lo_fit, hi_fit, 500)
+        # Gaussian with amplitude scaled to histogram bin width
+        bin_w  = bins[1] - bins[0]
+        ys     = (res.amplitude * bin_w *
+                  _norm.pdf(xs, res.peak_adu, res.sigma_adu))
+        # Re-normalise: amplitude from fit_peak is histogram counts
+        # so just use the Gaussian directly
+        from ..physics.gain import _gauss
+        ys = _gauss(xs, res.amplitude, res.peak_adu, res.sigma_adu)
+
         ax2.plot(xs, ys, "r-", lw=2.5,
                  label=(f"Gaussian fit\n"
-                        f"Peak = {res.peak_ev:.1f} eV\n"
-                        f"σ    = {res.sigma_ev:.1f} eV\n"
+                        f"Peak = {res.peak_adu:.1f} eV\n"
+                        f"σ    = {res.sigma_adu:.1f} eV\n"
                         f"FWHM = {fwhm:.1f} eV\n"
                         f"R    = {resoln:.2f}%"))
-        ax2.axvline(res.peak_ev, color="red", lw=1, ls="--", alpha=0.6)
-        half_max = res.amplitude / 2.0
-        ax2.hlines(half_max,
-                   res.peak_ev - res.sigma_ev * 1.1774,
-                   res.peak_ev + res.sigma_ev * 1.1774,
-                   colors="red", lw=1.5, ls=":",
-                   label=f"FWHM = {fwhm:.1f} eV")
-        ax2.axvspan(target_ev * (1 - fit_window),
-                    target_ev * (1 + fit_window),
-                    alpha=0.07, color="red", label="Fit window")
+        ax2.axvline(res.peak_adu, color="red", lw=1, ls="--", alpha=0.6)
 
         print(f"\n  ── Kα energy resolution ──")
-        print(f"     Peak  = {res.peak_ev:.2f} eV")
-        print(f"     σ     = {res.sigma_ev:.2f} eV")
+        print(f"     Peak  = {res.peak_adu:.2f} eV")
+        print(f"     σ     = {res.sigma_adu:.2f} eV")
         print(f"     FWHM  = {fwhm:.2f} eV")
         print(f"     R     = {resoln:.3f}%")
         print(f"     N_fit = {res.n_events:,} events in fit window")
     else:
-        print(f"  ⚠ Kα resolution fit failed: {res.message}")
+        print("  ⚠  Kα resolution fit failed — check ROI and statistics.")
 
     ax2.axvline(target_ev,   color="red",  lw=1.2, ls="--", alpha=0.5)
     ax2.axvline(MN_KBETA_EV, color="blue", lw=1.2, ls="--", alpha=0.5,
                 label=f"Mn Kβ {MN_KBETA_EV:.0f} eV")
     ax2.set_xlabel("Energy [eV]")
     ax2.set_ylabel("Counts / bin")
-    ax2.set_title("All-grades sum  (linear scale) + Kα resolution fit")
+    ax2.set_title("All-grades sum  (linear) + Kα resolution fit")
     ax2.legend(fontsize=8)
     ax2.grid(alpha=0.3)
     ax2.set_xlim(lo, hi)
@@ -167,54 +171,3 @@ def plot_final_spectrum(events: np.ndarray,
     fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  → {p}")
-
-
-def _compute_cti_check_data(
-        events:       np.ndarray,
-        e_prelim:     np.ndarray,
-        e_cti:        np.ndarray,
-        row_bin_size: int = 64,
-) -> dict:
-    """
-    Compute before/after CTI correction peak-vs-row data for single events.
-
-    Both e_prelim and e_cti must have the same length as events (all grades).
-    The function filters to singles internally using a mask over the full array.
-
-    Returns dict with:
-        before: {row_bins, peak_per_bin, peak_success}
-        after:  {row_bins, peak_per_bin, peak_success}
-    """
-    # Build singles mask over the FULL events array
-    s_mask   = np.isin(events["grade"], list(SINGLE_GRADES))
-    rows_s   = events["Y"][s_mask].astype(int)      # rows of single events
-    ep_s     = e_prelim[s_mask]                      # prelim energy, singles only
-    ec_s     = e_cti[s_mask]                         # CTI-corrected, singles only
-
-    max_row   = int(rows_s.max()) + 1 if len(rows_s) > 0 else 1
-    bin_edges = np.arange(0, max_row + row_bin_size + 1, row_bin_size)
-    bin_ctrs  = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-
-    result = {
-        "before": {"row_bins": bin_ctrs,
-                   "peak_per_bin": np.full(len(bin_ctrs), np.nan),
-                   "peak_success": np.zeros(len(bin_ctrs), dtype=bool)},
-        "after":  {"row_bins": bin_ctrs,
-                   "peak_per_bin": np.full(len(bin_ctrs), np.nan),
-                   "peak_success": np.zeros(len(bin_ctrs), dtype=bool)},
-    }
-
-    for ri, (y0, y1) in enumerate(zip(bin_edges[:-1], bin_edges[1:])):
-        bm = (rows_s >= y0) & (rows_s < y1)   # mask over singles arrays
-        if bm.sum() < 30:
-            continue
-        for key, ep in [("before", ep_s), ("after", ec_s)]:
-            res = fit_peak(ep[bm], nominal=MN_KALPHA_EV,
-                           window_frac=0.15, n_bins=50, min_events=30)
-            if res.success:
-                result[key]["peak_per_bin"][ri] = res.peak_ev
-                result[key]["peak_success"][ri] = True
-
-    return result
-
-

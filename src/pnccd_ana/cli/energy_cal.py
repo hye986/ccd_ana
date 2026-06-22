@@ -46,13 +46,20 @@ def run(cfg: Config) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Resolve paths ─────────────────────────────────────────────────────────
-    events_file = ec.get("events_file") or str(cfg.events_path())
-    events_path = cfg.resolve_output_path(events_file) or cfg.events_path()
+    events_file_cfg = ec.get("events_file")
+    if events_file_cfg:
+        events_path = cfg.resolve_output_path(events_file_cfg)
+    else:
+        events_path = cfg.events_path()   # already = output_dir/events.h5
+
     if not events_path.exists():
         raise FileNotFoundError(f"Events file not found: {events_path}")
 
-    output_file = ec.get("output_file") or "energy_cal.h5"
-    output_path = cfg.resolve_output_path(output_file)
+    output_file_cfg = ec.get("output_file")
+    if output_file_cfg:
+        output_path = cfg.resolve_output_path(output_file_cfg)
+    else:
+        output_path = cfg.output_dir / "energy_cal.h5"
 
     # ── Load events ───────────────────────────────────────────────────────────
     print(f"\nLoading events from: {events_path}")

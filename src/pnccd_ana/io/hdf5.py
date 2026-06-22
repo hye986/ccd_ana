@@ -843,26 +843,18 @@ def load_energy_cal_results_h5(path: str | Path) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def save_event_rec_results_h5(
-        out_dir:    Path,
-        events:     np.ndarray,
-        spectra:    dict[int, np.ndarray],
-        bin_edges:  np.ndarray,
-        hit_count:  np.ndarray,
-        mean_adu:   np.ndarray,
-        sample_arr: np.ndarray | None,
-        noise_map:  np.ndarray,
-        gen:        dict,
-        seed_sigma: float,
-        n_frames:   int,
+        out_dir:      Path,
+        cluster_data: dict,          # ← was: events: np.ndarray
+        spectra:      dict[int, np.ndarray],
+        bin_edges:    np.ndarray,
+        hit_count:    np.ndarray,
+        mean_adu:     np.ndarray,
+        sample_arr:   np.ndarray | None,
+        noise_map:    np.ndarray,
+        gen:          dict,
+        seed_sigma:   float,
+        n_frames:     int,
 ) -> None:
-    """
-    Save plot-backing data to event_rec_results.h5.
-
-    /raw_spectrum/{bin_edges, all_pixels, positive_pixels, above_seed,
-                   seed_threshold_adu, seed_sigma, median_noise_adu}
-    /cluster_size_distribution/{n_pixels, counts}
-    /meta/...
-    """
     path = out_dir / "event_rec_results.h5"
     path.parent.mkdir(parents=True, exist_ok=True)
     print(f"\nSaving event_rec results: {path}")
@@ -877,10 +869,12 @@ def save_event_rec_results_h5(
             for k, v in raw_data.items():
                 rg.create_dataset(k, data=v)
 
-        # Cluster-size distribution (replaces grade_distribution)
-        if len(events) > 0:
-            npix_vals, npix_counts = np.unique(events["n_pixels"],
-                                               return_counts=True)
+        # Cluster-size distribution from CSR data
+        n_events = len(cluster_data["flag"])
+        if n_events > 0:
+            from ..physics.event_filter import n_pixels_per_event
+            npix = n_pixels_per_event(cluster_data)
+            npix_vals, npix_counts = np.unique(npix, return_counts=True)
             cg = f.require_group("cluster_size_distribution")
             cg.create_dataset("n_pixels", data=npix_vals.astype(np.int32))
             cg.create_dataset("counts",   data=npix_counts.astype(np.int64))
@@ -890,8 +884,9 @@ def save_event_rec_results_h5(
         mg.attrs["seed_sigma"]  = seed_sigma
         mg.attrs["split_sigma"] = float(gen.get("split_sigma", 3.0))
         mg.attrs["n_frames"]    = n_frames
-        mg.attrs["n_events"]    = len(events)
-        mg.attrs["frame_shape"] = f"{noise_map.shape[0]}x{noise_map.shape[1]}"
+        mg.attrs["n_events"]    = n_events
+        mg.attrs["frame_shape"] = (f"{noise_map.shape[0]}x"
+                                   f"{noise_map.shape[1]}")
 
     print("  ✓ saved.")
 

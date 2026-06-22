@@ -13,16 +13,18 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import h5py
 import numpy as np
 
 from ..config import Config
 from ..physics import (find_events,
-                       EVENT_DTYPE,
                        build_bad_pixel_mask,
                        ASIC_SLICES, ASIC_WIDTH,
                        configure_asics, get_active_mask,
-                       cm_correct_frame)
+                       cm_correct_frame,
+                       n_pixels_per_event,
+                       adu_sums,
+                       seed_pixels,
+                       _empty_result)
 from ..io import (load_calibration_h5, load_calibration_npy,
                   save_events_h5,
                   save_event_rec_results_h5)
@@ -52,17 +54,13 @@ def _build_noise_map(cal: dict,
                      noise_scope: str = "auto") -> np.ndarray:
     """
     Assemble a full noise map from calibration for single-hybrid.
-    
+
     For single-hybrid mode, returns the global noise map directly.
+    noise_scope parameter reserved for future multi-ASIC stitching.
     """
-    noise_scope = (noise_scope or "auto").lower()
-    
-    # Get dimensions from calibration
     if "global" in cal and "noise" in cal["global"]:
-        noise = cal["global"]["noise"].copy()
-        return noise
-    else:
-        raise RuntimeError("No global noise map found in calibration.")
+        return cal["global"]["noise"].copy()
+    raise RuntimeError("No global noise map found in calibration.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -85,8 +83,6 @@ def _build_bad_pixel_mask(
 ) -> np.ndarray | None:
     """
     Assemble a bad-pixel mask from the dark calibration for single-hybrid.
-
-    For single-hybrid mode, uses the global noise map directly.
     """
     cfg = {**_BAD_PIXEL_DEFAULTS, **(user_cfg or {})}
     if not cfg["enabled"]:
@@ -94,14 +90,14 @@ def _build_bad_pixel_mask(
         return None
 
     print("\nBuilding bad-pixel mask:")
-    
+
     active = (search_mask if search_mask is not None
               else np.ones(noise_map.shape, dtype=bool))
-    
+
     clip = None
     if "global" in cal:
         clip = cal["global"].get("n_clipped_map")
-    
+
     mask = build_bad_pixel_mask(
         noise_map,
         n_clipped_map     = clip,
@@ -112,12 +108,11 @@ def _build_bad_pixel_mask(
         active_mask       = active,
         label             = "global",
     )
-
     return mask
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Per-chunk worker (single-hybrid)
+# Frame correction
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _correct_frame(raw: np.ndarray,
@@ -130,25 +125,7 @@ def _correct_frame(raw: np.ndarray,
     Offset subtract + CM correct one raw frame.
 
     Overflow and underflow sentinel values are detected from the raw
-    integer frame BEFORE offset subtraction and excluded from the CM
-    median, matching ROOT HCommonModeMedian.
-
-    When split_even_odd=True, uses HCommonModeMedianEvenOdd logic:
-    independent medians for even- and odd-indexed columns within each
-    ASIC segment (matching Analysis.Filter.SplitEvenOdd=1).
-
-    Parameters
-    ----------
-    raw            : uint16 (n_Y, n_X) — raw ADC frame
-    cal            : calibration dict with cal["global"]["offset"]
-    asic_slices    : ASIC geometry for per-ASIC CM (None = full-row CM)
-    bad_pixel_mask : bool (n_Y, n_X) or None — static bad pixels
-    n_bits         : ADC bit depth (default 16)
-    split_even_odd : separate even/odd column medians per ASIC
-
-    Returns
-    -------
-    corrected : float32 (n_Y, n_X)
+    integer frame BEFORE offset subtraction, matching ROOT behaviour.
     """
     overflow_val = (1 << n_bits) - 1
 
@@ -163,16 +140,18 @@ def _correct_frame(raw: np.ndarray,
 
     corrected, _, _ = cm_correct_frame(
         full,
-        asic_slices=asic_slices,
-        bad_pixel_mask=bad_pixel_mask,
-        overflow_mask=overflow_mask,
-        underflow_mask=underflow_mask,
-        split_even_odd=split_even_odd,
+        asic_slices    = asic_slices,
+        bad_pixel_mask = bad_pixel_mask,
+        overflow_mask  = overflow_mask,
+        underflow_mask = underflow_mask,
+        split_even_odd = split_even_odd,
     )
     return corrected
 
 
-# ── replace the worker ────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Per-chunk worker
+# ──────────────────────────────────────────────────────────────────────────────
 
 def _make_worker(cal, asics, noise_map,
                  seed_sigma, split_sigma,
@@ -183,7 +162,7 @@ def _make_worker(cal, asics, noise_map,
                  split_even_odd=False):
     """
     Return a closure for process_frames_mt.
-    Returns concatenated cluster_data dict (CSR) per chunk.
+    Returns a CSR cluster_data dict per chunk.
     """
     import threading
     _lock = threading.Lock()
@@ -193,7 +172,7 @@ def _make_worker(cal, asics, noise_map,
         chunk_Y:   list[np.ndarray] = []
         chunk_X:   list[np.ndarray] = []
         chunk_adu: list[np.ndarray] = []
-        chunk_off: list[np.ndarray] = []   # per-frame offset arrays
+        chunk_off: list[np.ndarray] = []
         chunk_flg: list[np.ndarray] = []
         running_offset = np.int64(0)
 
@@ -220,7 +199,7 @@ def _make_worker(cal, asics, noise_map,
             chunk_Y.append(cd["pixel_Y"])
             chunk_X.append(cd["pixel_X"])
             chunk_adu.append(cd["pixel_adu"])
-            # Shift offsets by running total pixel count
+            # Strip the sentinel from per-frame offsets before shifting
             chunk_off.append(cd["offsets"][:-1] + running_offset)
             chunk_flg.append(cd["flag"])
             running_offset += np.int64(len(cd["pixel_Y"]))
@@ -228,7 +207,6 @@ def _make_worker(cal, asics, noise_map,
         if not chunk_flg:
             return _empty_cluster_chunk()
 
-        # Merge all frames in this chunk into one CSR block
         return {
             "pixel_Y":        np.concatenate(chunk_Y).astype(np.int16),
             "pixel_X":        np.concatenate(chunk_X).astype(np.int16),
@@ -237,6 +215,7 @@ def _make_worker(cal, asics, noise_map,
             "flag":           np.concatenate(chunk_flg).astype(np.uint8),
             "n_pixels_total": int(running_offset),
         }
+
     return _worker
 
 
@@ -260,7 +239,6 @@ def _merge_chunks(results: list[dict]) -> dict:
     """
     non_empty = [r for r in results if r["n_pixels_total"] > 0]
     if not non_empty:
-        from ..physics.event_filter import _empty_result
         return _empty_result()
 
     all_Y   = np.concatenate([r["pixel_Y"]   for r in non_empty])
@@ -268,14 +246,13 @@ def _merge_chunks(results: list[dict]) -> dict:
     all_adu = np.concatenate([r["pixel_adu"] for r in non_empty])
     all_flg = np.concatenate([r["flag"]      for r in non_empty])
 
-    # Rebuild global offsets: shift each chunk's offsets by cumulative pixels
     cum_pixels = np.int64(0)
     off_parts: list[np.ndarray] = []
     for r in non_empty:
         off_parts.append(r["offsets_no_end"] + cum_pixels)
         cum_pixels += np.int64(r["n_pixels_total"])
+
     all_off = np.concatenate(off_parts)
-    # Append final sentinel
     all_off = np.append(all_off, cum_pixels).astype(np.int64)
 
     return {
@@ -286,6 +263,7 @@ def _merge_chunks(results: list[dict]) -> dict:
         "flag":      all_flg,
     }
 
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Multi-file path resolution
 # ──────────────────────────────────────────────────────────────────────────────
@@ -294,20 +272,16 @@ def _resolve_paths(file_spec) -> list[Path]:
     """
     Resolve a file specification to a sorted list of concrete paths.
 
-    Accepts:
-      - a single path string, optionally containing shell glob wildcards
-        (e.g. "data/source_run00*_H1.raw")
-      - a list of path strings (each may itself contain globs)
-
+    Accepts a single path string (with optional globs) or a list of paths.
     Raises FileNotFoundError if no files match.
     """
-    from pathlib import Path
     from glob import glob
 
     if isinstance(file_spec, (str, Path)):
         specs = [str(file_spec)]
     else:
         specs = [str(s) for s in file_spec]
+
     paths: list[Path] = []
     for spec in specs:
         matched = sorted(glob(str(spec)))
@@ -335,19 +309,17 @@ def run(cfg: Config) -> dict:
     out_dir = cfg.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    source_run_file = ec["source_run_file"]
+    source_run_file  = ec["source_run_file"]
     calibration_file = ec["calibration_file"]
-    
-    # Resolve paths: input files from data_dir, output files to output_dir
+
     if not source_run_file:
         raise ValueError("[event_rec] source_run_file must be set.")
-    
+
     source_run_path = cfg.resolve_input_path(source_run_file)
-    
-    # Calibration file: default to output_dir/offset.h5
-    # If user provides a path, try data_dir first, then output_dir
+
+    # Calibration file resolution
     if calibration_file:
-        cal_input = cfg.resolve_input_path(calibration_file)
+        cal_input  = cfg.resolve_input_path(calibration_file)
         cal_output = cfg.resolve_output_path(calibration_file)
         if cal_input and cal_input.exists():
             calibration_path = cal_input
@@ -359,97 +331,93 @@ def run(cfg: Config) -> dict:
     else:
         calibration_path = cfg.calibration_path()
 
-    asics           = cfg.asics_for("event_rec")
-    seed_sigma      = float(ec.get("seed_sigma",  ec.get("threshold_sigma", 5.0)))
-    split_sigma     = float(ec.get("split_sigma", 3.0))
-    reject_extra    = bool(ec.get("reject_extra", False))
-    prefer          = ec.get("prefer_offset", "sigclip")
-    noise_scope     = ec.get("noise_scope", "auto")
-    stage_skip      = int(ec.get("skip_frames", 0))
-    stage_max       = ec.get("max_frames", None)
+    asics        = cfg.asics_for("event_rec")
+    seed_sigma   = float(ec.get("seed_sigma",  ec.get("threshold_sigma", 5.0)))
+    split_sigma  = float(ec.get("split_sigma", 3.0))
+    prefer       = ec.get("prefer_offset", "sigclip")
+    noise_scope  = ec.get("noise_scope", "auto")
+    stage_skip   = int(ec.get("skip_frames", 0))
+    stage_max    = ec.get("max_frames", None)
     if stage_max is not None:
         stage_max = int(stage_max)
-    effective_max   = stage_max if stage_max is not None else gen["max_frames"]
+    effective_max = stage_max if stage_max is not None else gen["max_frames"]
 
     # ── Load calibration ──────────────────────────────────────────────────────
     print(f"\nLoading calibration from: {calibration_path}")
-    cal = _load_cal(calibration_path, asics=None, prefer=prefer)
-    
-    # Ensure global calibration exists
+    cal = _load_cal(str(calibration_path), asics=None, prefer=prefer)
+
     if "global" not in cal:
-        raise RuntimeError("Calibration must contain 'global' section for single-hybrid mode.")
+        raise RuntimeError(
+            "Calibration must contain 'global' section for single-hybrid mode.")
 
     noise_map = _build_noise_map(cal, noise_scope=noise_scope)
     H, W = noise_map.shape
 
     # ── Configure ASIC geometry ───────────────────────────────────────────────
-    n_asics = int(gen.get("ASIC_num", 8))
+    n_asics   = int(gen.get("ASIC_num", 8))
     asic_mask = gen.get("ASIC_mask", [])
     configure_asics(n_asics, W, H, mask=asic_mask)
-    
-    # Per-ASIC CM slices - include ALL ASICs for CM correction (even masked ones)
-    # CM is computed per ASIC using 64 columns each
+
     asic_slices = ASIC_SLICES if len(ASIC_SLICES) > 1 else None
-
-    # ── Build search mask (respects ASIC mask) ──────────────────────────────
-    # Create active mask that excludes masked ASICs from event search
     active_mask = get_active_mask(H, W, n_asics, asic_mask)
-    search_mask: np.ndarray | None = active_mask
+    search_mask = active_mask
 
-    # ── Build bad-pixel mask from calibration ─────────────────────────────────
-    bad_pixel_mask = _build_bad_pixel_mask(cal, noise_map=noise_map, search_mask=active_mask,
-                                            user_cfg=ec.get("bad_pixel_mask"))
+    # ── Bad-pixel mask ────────────────────────────────────────────────────────
+    bad_pixel_mask = _build_bad_pixel_mask(
+        cal, noise_map=noise_map, search_mask=active_mask,
+        user_cfg=ec.get("bad_pixel_mask"))
     if bad_pixel_mask is not None and bool(bad_pixel_mask.any()):
         np.save(out_dir / "bad_pixel_mask.npy", bad_pixel_mask)
 
-    # ── Resolve file list (single path, glob, or list) ────────────────────────
+    # ── Resolve source file list ──────────────────────────────────────────────
     run_files = _resolve_paths(source_run_path)
     print(f"\nSource run file(s): {len(run_files)} file(s) matched")
     for p in run_files:
         print(f"  {p}")
 
-    # ── Discover and process frames across all files ──────────────────────────
-    # Always uses RAW format (512x512 or 1024x512 based on frame_rows config)
+    # ── I/O module ────────────────────────────────────────────────────────────
     from ..io.raw import get_io_module as raw_get_io_module
     io = raw_get_io_module(gen.get("data_format", "raw"))
 
-    raw_kwargs = {}
+    raw_kwargs: dict = {}
     if gen.get("frame_rows"):
         raw_kwargs["height"] = gen["frame_rows"]
     if gen.get("frame_cols"):
         raw_kwargs["width"] = gen["frame_cols"]
 
-    # Print ASIC configuration
     if asic_mask:
         print(f"  ASIC mask applied: excluding ASICs {asic_mask}")
-    print(f"  ASIC configuration: {n_asics} ASICs × {ASIC_WIDTH} columns = {W} total columns")
+    print(f"  ASIC configuration: {n_asics} ASICs × {ASIC_WIDTH} columns"
+          f" = {W} total columns")
     print(f"  Per-ASIC CM correction: {'enabled' if asic_slices else 'disabled'}")
-
-    # Sample buffer for raw spectrum plots (collect up to 200 corrected frames)
-    # Shared across all input files — worker appends to it as frames are processed.
-    sample_buf: list = []
 
     split_even_odd = bool(ec.get("split_even_odd", True))
     print(f"  Even/odd CM split: {'enabled' if split_even_odd else 'disabled'}")
 
+    # Sample buffer for raw spectrum plots
+    sample_buf: list = []
+
     worker = _make_worker(cal, asics, noise_map,
                           seed_sigma, split_sigma,
                           search_mask,
-                          bad_pixel_mask=bad_pixel_mask,
-                          sample_buf=sample_buf, sample_max=200,
-                          asic_slices=asic_slices,
-                          split_even_odd=split_even_odd)
+                          bad_pixel_mask  = bad_pixel_mask,
+                          sample_buf      = sample_buf,
+                          sample_max      = 200,
+                          asic_slices     = asic_slices,
+                          split_even_odd  = split_even_odd)
 
-    all_results: list[np.ndarray] = []
-    remaining = effective_max
+    # ── Process all source files ──────────────────────────────────────────────
+    all_results: list[dict] = []          # list of per-chunk CSR dicts
+    remaining              = effective_max
     total_frames_processed = 0
-    is_first_file = True
+    is_first_file          = True
 
     for fpath in run_files:
         if remaining is not None and remaining <= 0:
             break
         print(f"\nOpening source file: {fpath}")
-        request_max = remaining if remaining is None else remaining + (stage_skip if is_first_file else 0)
+        request_max = (remaining if remaining is None
+                       else remaining + (stage_skip if is_first_file else 0))
         indices = io.get_frame_indices(fpath,
                                        complete_only=gen["complete_only"],
                                        max_frames=request_max,
@@ -460,9 +428,11 @@ def run(cfg: Config) -> dict:
                                              skip_frames=stage_skip,
                                              max_frames=remaining)
         is_first_file = False
+
         print(f"Processing {len(indices)} frames  "
               f"(seed={seed_sigma}σ, split={split_sigma}σ,  "
               f"workers={gen['n_workers']}, chunk={gen['chunk_size']})")
+
         file_results = io.process_frames_mt(fpath, indices, worker,
                                             chunk_size=gen["chunk_size"],
                                             n_workers=gen["n_workers"],
@@ -477,18 +447,14 @@ def run(cfg: Config) -> dict:
           f"max={effective_max if effective_max is not None else 'all'}  "
           f"total loaded={total_frames_processed}")
 
-
-    results = all_results
-
-    # ── Merge chunks ──────────────────────────────────────────────────────────
+    # ── Merge all chunks into one CSR cluster_data dict ───────────────────────
     cluster_data = _merge_chunks(all_results)
     n_events     = len(cluster_data["flag"])
-    print(f"\nTotal events: {n_events:,}")
-    print(f"Total pixels: {len(cluster_data['pixel_Y']):,}")
+    print(f"\nTotal events : {n_events:,}")
+    print(f"Total pixels : {len(cluster_data['pixel_Y']):,}")
 
     # ── Diagnostic summary ────────────────────────────────────────────────────
     if n_events > 0:
-        from ..physics.event_filter import n_pixels_per_event, adu_sums
         npix    = n_pixels_per_event(cluster_data)
         adusums = adu_sums(cluster_data)
 
@@ -503,15 +469,18 @@ def run(cfg: Config) -> dict:
     # ── Spectra by cluster size ───────────────────────────────────────────────
     bin_edges = np.linspace(ec["adu_min"], ec["adu_max"], ec["n_bins"] + 1)
     spectra: dict[int, np.ndarray] = {}
+
     if n_events > 0:
         npix    = n_pixels_per_event(cluster_data)
         adusums = adu_sums(cluster_data)
-        for n in range(1, 6):
+        for n in range(1, 5):     # 1=single .. 4=quad
             m = npix == n
             spectra[n], _ = (np.histogram(adusums[m], bins=bin_edges)
                              if m.any() else
-                             (np.zeros(ec["n_bins"], dtype=np.int64), bin_edges))
-        m_large = npix >= 5
+                             (np.zeros(ec["n_bins"], dtype=np.int64),
+                              bin_edges))
+        # n_pixels >= 5 grouped as "large"
+        m_large   = npix >= 5
         spectra[5], _ = (np.histogram(adusums[m_large], bins=bin_edges)
                          if m_large.any() else
                          (np.zeros(ec["n_bins"], dtype=np.int64), bin_edges))
@@ -519,21 +488,28 @@ def run(cfg: Config) -> dict:
         for n in range(1, 6):
             spectra[n] = np.zeros(ec["n_bins"], dtype=np.int64)
 
-    # ── 2-D maps ──────────────────────────────────────────────────────────────
+    # ── 2-D hit-count and mean-ADU maps ──────────────────────────────────────
+        # ── 2-D hit-count and mean-ADU maps ──────────────────────────────────────
     hit_count = np.zeros((H, W), dtype=np.int32)
     hit_adu   = np.zeros((H, W), dtype=np.float64)
+
     if n_events > 0:
-        from ..physics.event_filter import seed_pixels, adu_sums as _sums
         sY, sX, _ = seed_pixels(cluster_data)
-        adusums   = _sums(cluster_data)
-        np.add.at(hit_count, (sY.astype(int), sX.astype(int)), 1)
-        np.add.at(hit_adu,   (sY.astype(int), sX.astype(int)),
-                  adusums.astype(np.float64))
+        adusums    = adu_sums(cluster_data)
+
+        flat_seed  = sY.astype(np.intp) * W + sX.astype(np.intp)
+        hit_count  = np.bincount(flat_seed,
+                                  minlength=H * W).reshape(H, W).astype(np.int32)
+        hit_adu    = np.bincount(flat_seed,
+                                  weights=adusums.astype(np.float64),
+                                  minlength=H * W).reshape(H, W)
+
     with np.errstate(invalid="ignore"):
         mean_adu = np.where(hit_count > 0,
-                            hit_adu / hit_count, np.nan).astype(np.float32)
+                            hit_adu / hit_count,
+                            np.nan).astype(np.float32)
 
-    # ── Save ──────────────────────────────────────────────────────────────────
+    # ── Save events.h5 ────────────────────────────────────────────────────────
     save_events_cfg = ec.get("save_events", "events.h5")
     if save_events_cfg:
         events_path = cfg.resolve_output_path(save_events_cfg)
@@ -542,46 +518,49 @@ def run(cfg: Config) -> dict:
         save_events_h5(
             events_path,
             cluster_data, spectra, bin_edges, hit_count, mean_adu,
-            metadata={**gen.get("metadata", {}),
-                      "source_file":    str(source_run_path),
-                      "calibration":    str(calibration_path),
-                      "seed_sigma":     seed_sigma,
-                      "split_sigma":    split_sigma,
-                      "n_frames":       int(total_frames_processed)},
+            metadata={
+                **gen.get("metadata", {}),
+                "source_file":  str(source_run_path),
+                "calibration":  str(calibration_path),
+                "seed_sigma":   seed_sigma,
+                "split_sigma":  split_sigma,
+                "n_frames":     int(total_frames_processed),
+            },
         )
 
-    # Maps are saved in events.h5 under /maps/
-
-    # ── Save plot-backing data ────────────────────────────────────────────────
-    if sample_buf:
-        sample_arr = np.stack(sample_buf, axis=0)
-    else:
-        sample_arr = None
+    # ── Save plot-backing data (event_rec_results.h5) ─────────────────────────
+    sample_arr = np.stack(sample_buf, axis=0) if sample_buf else None
     save_event_rec_results_h5(
-        out_dir, events, spectra, bin_edges, hit_count, mean_adu,
+        out_dir, cluster_data, spectra, bin_edges,
+        hit_count, mean_adu,
         sample_arr, noise_map, gen, seed_sigma, total_frames_processed,
     )
 
     # ── Plots ─────────────────────────────────────────────────────────────────
-    print("\nGenerating plots …")
     if gen["save_frame_plots"]:
+        print("\nGenerating plots …")
         plot_hitmap(hit_count, mean_adu, out_dir, asics)
-        plot_spectrum(spectra, bin_edges, out_dir, events=events)
-        # plot_grade_distribution removed — no grades assigned here
-
+        plot_spectrum(spectra, bin_edges, out_dir,
+                      cluster_data=cluster_data)
         if sample_arr is not None:
             plot_raw_spectrum(
-                corrected_frames=sample_arr,
-                noise_map=noise_map,
-                bin_edges=bin_edges,
-                out_dir=out_dir,
-                seed_sigma=seed_sigma,
-                title_suffix="global",
+                corrected_frames = sample_arr,
+                noise_map        = noise_map,
+                bin_edges        = bin_edges,
+                out_dir          = out_dir,
+                seed_sigma       = seed_sigma,
+                title_suffix     = "global",
             )
 
     print(f"\n✓ Source analysis complete.  Output: {out_dir}/")
-    return dict(events=events, spectra=spectra, bin_edges=bin_edges,
-                hit_count=hit_count, mean_adu=mean_adu)
+
+    return dict(
+        cluster_data = cluster_data,
+        spectra      = spectra,
+        bin_edges    = bin_edges,
+        hit_count    = hit_count,
+        mean_adu     = mean_adu,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

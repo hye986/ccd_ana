@@ -212,11 +212,11 @@ class Config:
 
     def calibration_path(self) -> Path:
         """Default path for offset calibration file."""
-        return self.resolve_output_path("offset.h5")
+        return self.output_dir / "offset.h5"
 
     def events_path(self) -> Path:
         """Default path for events file."""
-        return self.resolve_output_path("events.h5")
+        return self.output_dir / "events.h5" 
 
     def asics_for(self, section: str) -> list[str] | None:
         """Return resolved ASIC list for *section*."""
