@@ -246,13 +246,37 @@ def run(cfg: Config) -> dict:
     energy_sum, cog_row, cog_col, seed_energy = compute_final_energies(
         cluster_data, gain_map, n_rows, n_cols)
 
-    # Mean CTI (ROOT: from CTEMap row=1 values)
+    # ── CTI summary ─────────────────────────────────────────────────────────────
+    # cte_map stores gain correction = (1/cte_im_b)^n_transfers
+    # At row=1: gain_correction = 1/cte_im_b  →  cte_im_b = 1/cte_map[1]
+    # CTI per transfer = 1 - cte_im_b = 1 - 1/cte_map[row=1]
     if cte_result is not None:
-        cte_row1  = cte_result.cte_map[1, :]
         good_cols = cte_result.bad_gain_map[0, :] == 0
         if good_cols.any():
-            mean_cti = float(np.mean(1.0 - cte_row1[good_cols]))
-            print(f"  Mean CTI (row=1, good columns): {mean_cti:.3e}")
+            corr_row1 = cte_result.cte_map[1, good_cols]   # gain correction at row 1
+            valid     = corr_row1 > 0.5
+            if valid.any():
+                cte_per_transfer  = 1.0 / corr_row1[valid]       # actual CTE per transfer
+                cti_per_transfer = 1.0 - cte_per_transfer         # CTI per transfer
+                mean_cti  = float(np.mean(cti_per_transfer))
+                std_cti   = float(np.std(cti_per_transfer))
+                med_cti   = float(np.median(cti_per_transfer))
+                print(f"\n  ── CTI summary ──────────────────────────────────")
+                print(f"     Good columns : {valid.sum()} / {n_cols}")
+                print(f"     CTI per transfer:")
+                print(f"       mean   = {mean_cti:.3e}")
+                print(f"       median = {med_cti:.3e}")
+                print(f"       std    = {std_cti:.3e}")
+                print(f"     Expected for pnCCD: ~1e-5 to 1e-4")
+                print(f"  ────────────────────────────────────────────────────")
+            else:
+                print(f"  ⚠  CTI: no valid columns (cte_map may be all 1.0 — check ROI)")
+                mean_cti = 0.0
+        else:
+            print(f"  ⚠  CTI: no good columns in bad_gain_map")
+            mean_cti = 0.0
+    else:
+        mean_cti = 0.0
 
     # ── Spectrum plots and resolution fit ─────────────────────────────────────
     # Always compute resolution fit (result saved to HDF5 even without plots)
@@ -299,6 +323,7 @@ def run(cfg: Config) -> dict:
             "n_outer_iter":    n_outer_iter,
             "n_rows":          n_rows,
             "n_cols":          n_cols,
+            "mean_cti":       float(mean_cti),
             # Resolution fit results saved as metadata scalars
             "kalpha_peak_ev":    fit_result.get("peak_ev",    0.0),
             "kalpha_fwhm_ev":    fit_result.get("fwhm_ev",    0.0),

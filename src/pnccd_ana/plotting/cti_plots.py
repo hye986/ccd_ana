@@ -40,36 +40,49 @@ def plot_cti_summary(
         out_dir:      Path,
 ) -> None:
     """
-    CTI per column (row=1 CTE value) for good columns.
-    Shows distribution of 1-CTE as histogram and scatter vs column.
+    CTI per column from the gain correction map.
+
+    cte_map stores gain correction = (1/cte_im_b)^n_transfers.
+    At row=1: gain_correction = 1/cte_im_b
+    CTI per transfer = 1 - cte_im_b = 1 - 1/cte_map[row=1]
     """
     out_dir   = Path(out_dir)
     good_cols = bad_gain_map[0, :] == 0
-    cti_vals  = 1.0 - cte_map[1, good_cols]
-    cols      = np.where(good_cols)[0]
+    corr_row1 = cte_map[1, good_cols]          # gain correction at row=1
+    valid     = corr_row1 > 0.5
+    cti_vals  = 1.0 - 1.0 / corr_row1[valid]  # CTI per transfer — FIXED formula
+    cols      = np.where(good_cols)[0][valid]
+
+    if len(cti_vals) == 0:
+        print("  ⚠  plot_cti_summary: no valid columns")
+        return
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     axes[0].scatter(cols, cti_vals, s=3, color="steelblue", alpha=0.6)
-    axes[0].axhline(float(np.median(cti_vals)), color="tomato",
-                    linestyle="--", label=f"median={np.median(cti_vals):.2e}")
+    med = float(np.median(cti_vals))
+    axes[0].axhline(med, color="tomato", linestyle="--",
+                    label=f"median = {med:.2e}")
     axes[0].set_xlabel("Column")
-    axes[0].set_ylabel("CTI = 1 – CTE (row 1)")
+    axes[0].set_ylabel("CTI per transfer = 1 − 1/CTE_map[row=1]")
     axes[0].set_title("CTI per column")
     axes[0].legend()
 
-    lo, hi = np.percentile(cti_vals, [0.5, 99.5]) if len(cti_vals) > 1 \
-             else (0, 1e-3)
+    lo, hi = np.percentile(cti_vals, [0.5, 99.5])
     axes[1].hist(cti_vals, bins=100, range=(lo, hi),
                  color="steelblue", histtype="stepfilled", alpha=0.7)
-    axes[1].set_xlabel("CTI = 1 – CTE (row 1)")
+    axes[1].set_xlabel("CTI per transfer")
     axes[1].set_ylabel("Columns")
-    axes[1].set_title("CTI distribution")
+    axes[1].set_title(f"CTI distribution\n"
+                      f"median={med:.2e}  "
+                      f"(expected ~1e-5 to 1e-4 for pnCCD)")
 
     fig.tight_layout()
     fig.savefig(out_dir / "cti_summary.png", dpi=150)
     plt.close(fig)
-    print(f"  → {out_dir/'cti_summary.png'}")
+    print(f"  → {out_dir / 'cti_summary.png'}")
+    print(f"  CTI per transfer: median={med:.3e}  "
+          f"mean={cti_vals.mean():.3e}  std={cti_vals.std():.3e}")
 
 
 def plot_signal_vs_row(
