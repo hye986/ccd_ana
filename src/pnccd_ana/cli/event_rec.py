@@ -365,6 +365,10 @@ def run(cfg: Config) -> dict:
     active_mask = get_active_mask(H, W, n_asics, asic_mask)
     search_mask = active_mask
 
+    # ── Plot subdirectory ───────────────────────────────────────────────────
+    plot_dir = out_dir / "event_rec"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
     # ── Bad-pixel mask ────────────────────────────────────────────────────────
     bad_pixel_mask = _build_bad_pixel_mask(
         cal, noise_map=noise_map, search_mask=active_mask,
@@ -535,7 +539,7 @@ def run(cfg: Config) -> dict:
     # ── Save plot-backing data (event_rec_results.h5) ─────────────────────────
     sample_arr = np.stack(sample_buf, axis=0) if sample_buf else None
     save_event_rec_results_h5(
-        out_dir, cluster_data, spectra, bin_edges,
+        plot_dir, cluster_data, spectra, bin_edges,
         hit_count, mean_adu,
         sample_arr, noise_map, gen, seed_sigma, total_frames_processed,
     )
@@ -543,15 +547,15 @@ def run(cfg: Config) -> dict:
     # ── Plots ─────────────────────────────────────────────────────────────────
     if gen["save_frame_plots"]:
         print("\nGenerating plots …")
-        plot_hitmap(hit_count, mean_adu, out_dir, asics)
-        plot_spectrum(spectra, bin_edges, out_dir,
+        plot_hitmap(hit_count, mean_adu, plot_dir, asics)
+        plot_spectrum(spectra, bin_edges, plot_dir,
                       cluster_data=cluster_data)
         if sample_arr is not None:
             plot_raw_spectrum(
                 corrected_frames = sample_arr,
                 noise_map        = noise_map,
                 bin_edges        = bin_edges,
-                out_dir          = out_dir,
+                out_dir          = plot_dir,
                 seed_sigma       = seed_sigma,
                 title_suffix     = "global",
             )

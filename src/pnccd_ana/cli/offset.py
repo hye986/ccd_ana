@@ -240,8 +240,11 @@ def run(cfg: Config) -> dict:
     # ── Run analysis ──────────────────────────────────────────────────────────
     all_results: dict = {}
     split_even_odd = bool(oc.get("split_even_odd", True))
+    # PLOT_LABEL is used for subfolder name and plot titles; results dict
+    # key stays "global" so the HDF5 save structure is unchanged.
+    PLOT_LABEL = "offset"
     all_results["global"] = _analyse_scope(
-        data_raw, "global", methods, n_sigma, out_dir,
+        data_raw, PLOT_LABEL, methods, n_sigma, out_dir,
         asic_slices=asic_slices, build_bp_mask=True, active_mask=active_mask,
         split_even_odd=split_even_odd)
 
@@ -265,8 +268,10 @@ def run(cfg: Config) -> dict:
         save_calibration_npy(out_dir, save_payload)
 
     # ── Save plot-backing data ────────────────────────────────────────────────
+    plot_dir = out_dir / "offset"
+    plot_dir.mkdir(parents=True, exist_ok=True)
     _save_offset_results_h5(
-        out_dir, all_results, active_mask, gen,
+        plot_dir, all_results, active_mask, gen,
         n_sigma, total_frames, methods, n_asics)
 
     print(f"\n✓ Offset calibration complete.  Output: {out_dir}/")
@@ -278,7 +283,7 @@ def run(cfg: Config) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _save_offset_results_h5(
-        out_dir:   Path,
+        plot_dir:   Path,
         results:   dict,
         active_mask: np.ndarray,
         gen:       dict,
@@ -290,7 +295,7 @@ def _save_offset_results_h5(
     """
     Save histogram and map data backing the offset calibration plots.
 
-    Written to: {out_dir}/offset_results.h5
+    Written to: {plot_dir}/offset_results.h5
 
     Structure
     ---------
@@ -307,7 +312,7 @@ def _save_offset_results_h5(
     """
     import h5py   # local import — only needed here
 
-    path = out_dir / "offset_results.h5"
+    path = plot_dir / "offset_results.h5"
     print(f"\nSaving offset results: {path}")
 
     r = results.get("global", {})

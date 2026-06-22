@@ -1039,112 +1039,77 @@ def load_energy_cal_h5(path: str | Path) -> dict:
 
 
 def save_energy_cal_results_h5(
-        out_dir: Path,
-        rough,
-        cti,
-        col_result,
-        events: np.ndarray,
-        energy_ev: np.ndarray | None,
-        events_with_cti: np.ndarray | None,
-        cti_check_data: dict,
-        f_col_hist: dict,
-        pixel_gain_data: dict,
-        final_spectrum_data: dict,
-        metadata: dict,
+        plot_dir:     Path,
+        gain_map:     np.ndarray,
+        cte_map:      np.ndarray,
+        bad_gain_map: np.ndarray,
+        col_peaks,
+        grades:       np.ndarray,
+        energy_sum:   np.ndarray,
+        filtered,
+        fit_result:   dict,
+        metadata:     dict | None = None,
 ) -> None:
-    """Save plot-backing data to energy_cal_results.h5."""
+    """
+    Save plot-backing data for energy_cal stage.
+
+    Written to: {plot_dir}/energy_cal_results.h5
+
+    Structure
+    ---------
+    /gain_map                        float64 (n_rows, n_cols)
+    /cte_map                         float64 (n_rows, n_cols)
+    /bad_gain_map                    int8    (n_rows, n_cols)
+    /column_peaks/ppos               float64 (n_cols, n_halves)
+    /column_peaks/sigma              float64 (n_cols, n_halves)
+    /column_peaks/used_fallback     bool    (n_cols, n_halves)
+    /grades                          int8    (n_events,)
+    /energy_sum                      float32 (n_events,)
+    /filtered/adu_sum               float64 (n_filtered,)
+    /filtered/row                   float64 (n_filtered,)
+    /filtered/col                    float64 (n_filtered,)
+    /resolution_fit/<key>            attrs
+    /meta                            attrs
+    """
     import h5py
-    
-    path = out_dir / "energy_cal_results.h5"
+
+    path = Path(plot_dir) / "energy_cal_results.h5"
     path.parent.mkdir(parents=True, exist_ok=True)
     print(f"\nSaving energy_cal results: {path}")
 
     with h5py.File(path, "w") as f:
-        # Rough gain results
-        if rough is not None:
-            rg = f.require_group("rough_gain")
-            for key in ["g_even", "g_odd", "n_singles"]:
-                if hasattr(rough, key):
-                    rg.create_dataset(key, data=getattr(rough, key))
-            for attr_name, subgroup_name in [("peak_even", "peak_even"), ("peak_odd", "peak_odd")]:
-                if hasattr(rough, attr_name):
-                    peak = getattr(rough, attr_name)
-                    sg = rg.require_group(subgroup_name)
-                    for k, v in peak.__dict__.items():
-                        sg.create_dataset(k, data=v)
 
-        # CTI results
-        if cti is not None:
-            cg = f.require_group("cti")
-            cg.create_dataset("cti", data=float(cti.cti))
-            cg.create_dataset("e0", data=float(cti.e0))
-            if hasattr(cti, 'row_bins'):
-                cg.create_dataset("row_bins", data=cti.row_bins)
-            if hasattr(cti, 'peak_per_bin'):
-                cg.create_dataset("peak_per_bin", data=cti.peak_per_bin)
+        # Maps
+        f.create_dataset("gain_map",     data=gain_map,
+                         compression="gzip")
+        f.create_dataset("cte_map",      data=cte_map,
+                         compression="gzip")
+        f.create_dataset("bad_gain_map", data=bad_gain_map,
+                         compression="gzip")
 
-        # Column gain results
-        if col_result is not None:
-            gg = f.require_group("column_gain")
-            for key in ["f_col", "peak_col", "n_events_col", "success_col"]:
-                if hasattr(col_result, key):
-                    gg.create_dataset(key, data=getattr(col_result, key), compression="gzip")
+        # Column peaks
+        cg = f.require_group("column_peaks")
+        cg.create_dataset("ppos",          data=col_peaks.ppos)
+        cg.create_dataset("sigma",         data=col_peaks.sigma)
+        cg.create_dataset("used_fallback", data=col_peaks.used_fallback)
 
-        # Events
-        if events is not None and len(events) > 0:
-            eg = f.require_group("events")
-            for name in events.dtype.names or []:
-                eg.create_dataset(name, data=events[name], compression="gzip")
+        # Grade and energy
+        f.create_dataset("grades",     data=grades,     compression="gzip")
+        f.create_dataset("energy_sum", data=energy_sum, compression="gzip")
 
-        # Energy eV
-        if energy_ev is not None:
-            eg.create_dataset("energy_ev", data=energy_ev, compression="gzip")
+        # Filtered events (for signal_vs_row plot)
+        fg = f.require_group("filtered")
+        fg.create_dataset("adu_sum", data=filtered.adu_sum, compression="gzip")
+        fg.create_dataset("row",     data=filtered.row,     compression="gzip")
+        fg.create_dataset("col",     data=filtered.col,     compression="gzip")
 
-        # Events with CTI
-        if events_with_cti is not None and len(events_with_cti) > 0:
-            cg = f.require_group("events_with_cti")
-            for name in events_with_cti.dtype.names or []:
-                cg.create_dataset(name, data=events_with_cti[name], compression="gzip")
-
-        # CTI check data
-        if cti_check_data is not None:
-            ccd = f.require_group("cti_check")
-            for k, v in cti_check_data.items():
-                if isinstance(v, np.ndarray):
-                    ccd.create_dataset(k, data=v)
-                else:
-                    ccd.attrs[k] = v
-
-        # Column gain histogram
-        if f_col_hist is not None:
-            fhg = f.require_group("f_col_histogram")
-            for k, v in f_col_hist.items():
-                if isinstance(v, np.ndarray):
-                    fhg.create_dataset(k, data=v)
-                else:
-                    fhg.attrs[k] = v
-
-        # Pixel gain map data
-        if pixel_gain_data is not None:
-            pgd = f.require_group("pixel_gain_map")
-            for k, v in pixel_gain_data.items():
-                if isinstance(v, np.ndarray):
-                    pgd.create_dataset(k, data=v)
-                else:
-                    pgd.attrs[k] = v
-
-        # Final spectrum data
-        if final_spectrum_data is not None:
-            fsd = f.require_group("final_spectrum")
-            for k, v in final_spectrum_data.items():
-                if isinstance(v, np.ndarray):
-                    fsd.create_dataset(k, data=v)
-                elif isinstance(v, dict):
-                    sg = fsd.require_group(k)
-                    for sk, sv in v.items():
-                        sg.create_dataset(sk, data=sv)
-                else:
-                    fsd.attrs[k] = v
+        # Resolution fit result
+        rg = f.require_group("resolution_fit")
+        for k, v in fit_result.items():
+            try:
+                rg.attrs[k] = v
+            except TypeError:
+                rg.attrs[k] = str(v)
 
         # Metadata
         if metadata:
@@ -1155,66 +1120,4 @@ def save_energy_cal_results_h5(
                 except TypeError:
                     mg.attrs[k] = str(v)
 
-    print("  ✓ saved.")
-
-
-def _compute_cti_check_data(events: np.ndarray, cti: float, e0: float, 
-                            n_bins: int = 20) -> dict:
-    """Compute CTI correction check data."""
-    # Implementation here
-    return {}
-
-
-def _compute_f_col_histogram(f_col: np.ndarray, success: np.ndarray) -> dict:
-    """Compute column gain histogram data."""
-    return {}
-
-
-def _compute_pixel_gain_data(rough) -> dict:
-    """Compute pixel gain map data."""
-    return {}
-
-
-def _compute_final_spectrum_data(events: np.ndarray, energy_ev: np.ndarray) -> dict:
-    """Compute final spectrum data."""
-    return {}
-
-
-def save_offset_results_h5(
-        out_dir: Path,
-        offset_median: np.ndarray | None,
-        offset_sigclip: np.ndarray | None,
-        noise: np.ndarray | None,
-        cm_noise: np.ndarray | None,
-        n_clipped: np.ndarray | None,
-        bad_mask: np.ndarray | None,
-        gen: dict,
-) -> None:
-    """Save offset calibration results to HDF5."""
-    import h5py
-    
-    path = out_dir / "offset_results.h5"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\nSaving offset results: {path}")
-
-    with h5py.File(path, "w") as f:
-        if offset_median is not None:
-            f.create_dataset("offset_median", data=offset_median, compression="gzip")
-        if offset_sigclip is not None:
-            f.create_dataset("offset_sigclip", data=offset_sigclip, compression="gzip")
-        if noise is not None:
-            f.create_dataset("noise", data=noise, compression="gzip")
-        if cm_noise is not None:
-            f.create_dataset("cm_noise", data=cm_noise, compression="gzip")
-        if n_clipped is not None:
-            f.create_dataset("n_clipped", data=n_clipped, compression="gzip")
-        if bad_mask is not None:
-            f.create_dataset("bad_mask", data=bad_mask)
-        
-        # Metadata
-        mg = f.require_group("meta")
-        mg.attrs["method"] = gen.get("pedestal_method", "both")
-        mg.attrs["n_sigma"] = gen.get("n_sigma", 5.0)
-        mg.attrs["frame_rows"] = gen.get("frame_rows", 0)
-        
     print("  ✓ saved.")

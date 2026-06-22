@@ -44,6 +44,7 @@ def run(cfg: Config) -> dict:
     gen     = cfg.general
     out_dir = cfg.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir = out_dir / "energy_cal"
 
     # ── Resolve paths ─────────────────────────────────────────────────────────
     events_file_cfg = ec.get("events_file")
@@ -334,21 +335,42 @@ def run(cfg: Config) -> dict:
         },
     )
 
-    # ── Other plots (gain, CTE) ───────────────────────────────────────────────
+    # ── Plots (gain, CTE) and plot-backing data ────────────────────────────────
     if save_plots and cte_result is not None:
+        plot_dir.mkdir(parents=True, exist_ok=True)
         print("\nGenerating plots …")
-        plot_gain_map(gain_map, cte_result.bad_gain_map, out_dir)
+        plot_gain_map(gain_map, cte_result.bad_gain_map, plot_dir)
         plot_gain_histogram(gain_map, cte_result.bad_gain_map,
-                            split_even_odd, out_dir)
+                            split_even_odd, plot_dir)
         plot_gain_vs_row(gain_map,
                          cte_result.cte_map,
                          cte_result.bad_gain_map,
-                         out_dir)
-        plot_column_peaks(col_peaks, n_cols, out_dir)
-        plot_cte_map(cte_result.cte_map, out_dir)
+                         plot_dir)
+        plot_column_peaks(col_peaks, n_cols, plot_dir)
+        plot_cte_map(cte_result.cte_map, plot_dir)
         plot_cti_summary(cte_result.cte_map,
-                         cte_result.bad_gain_map, out_dir)
-        plot_signal_vs_row(filtered, out_dir)
+                         cte_result.bad_gain_map, plot_dir)
+        plot_signal_vs_row(filtered, plot_dir)
+
+        from ..io.hdf5 import save_energy_cal_results_h5
+        save_energy_cal_results_h5(
+            plot_dir     = plot_dir,
+            gain_map     = gain_map,
+            cte_map      = cte_result.cte_map,
+            bad_gain_map = cte_result.bad_gain_map,
+            col_peaks    = col_peaks,
+            grades       = grades,
+            energy_sum   = energy_sum,
+            filtered     = filtered,
+            fit_result   = fit_result,
+            metadata     = {
+                "calib_energy_ev": calib_energy,
+                "roi_low":         roi_low,
+                "roi_high":        roi_high,
+                "n_rows":          n_rows,
+                "n_cols":          n_cols,
+            },
+        )
 
     print(f"\n✓ Energy calibration complete.  Output: {out_dir}/")
 
