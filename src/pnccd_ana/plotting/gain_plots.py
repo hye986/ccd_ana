@@ -1,236 +1,174 @@
 """
 pnccd_ana.plotting.gain_plots
 ==============================
-Gain calibration plotting functions.
+Diagnostic plots for gain calibration.
 """
 
 from __future__ import annotations
-
 from pathlib import Path
+
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from .common import _cb, _stats_box, _build_grade_palette, _build_group_label
-from ..physics.gain import (RoughGainResult, ColumnGainResult,
-                             PeakFitResult, fit_peak, MN_KALPHA_EV, MN_KBETA_EV,
-                             _gaussian, SINGLE_GRADES)
+from ..physics.calibrate import GRADE_NAMES, N_GRADES
 
 
-def plot_rough_gain(rough: RoughGainResult,
-                     events: np.ndarray,
-                     out_dir: Path,
-                     target_ev: float,
-                     kalpha_adu: float,
-                     kalpha_window: float) -> None:
-    """Phase 1: ADU histograms for even/odd single-pixel events."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    singles   = events[np.isin(events["grade"], list(SINGLE_GRADES))]
-    even_mask = (singles["X"] % 2) == 0
+def plot_gain_map(
+        gain_map:     np.ndarray,
+        bad_gain_map: np.ndarray,
+        out_dir:      Path,
+        vmin:         float | None = None,
+        vmax:         float | None = None,
+) -> None:
+    """2-D colour map of gain [eV/ADU] with bad-pixel overlay."""
+    out_dir = Path(out_dir)
+    good    = gain_map[bad_gain_map == 0]
+    if len(good) == 0:
+        return
+    vmin = vmin or float(np.percentile(good, 1))
+    vmax = vmax or float(np.percentile(good, 99))
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle("Phase 1 — Rough Gain: Single-pixel ADU spectra",
-                 fontsize=13, fontweight="bold")
 
-    lo_adu = kalpha_adu * (1.0 - kalpha_window)
-    hi_adu = kalpha_adu * (1.0 + kalpha_window)
+    # Gain map
+    im = axes[0].imshow(gain_map, origin="lower",
+                        aspect="auto", vmin=vmin, vmax=vmax,
+                        cmap="viridis")
+    plt.colorbar(im, ax=axes[0], label="Gain [eV/ADU]")
+    axes[0].set_title("Gain Map")
+    axes[0].set_xlabel("X [detector column]")
+    axes[0].set_ylabel("Y [detector row]")
 
-    for ax, mask, label, res, g in [
-        (axes[0], even_mask,  "Even columns", rough.peak_even, rough.g_even),
-        (axes[1], ~even_mask, "Odd columns",  rough.peak_odd,  rough.g_odd),
-    ]:
-        adu = singles["adu_sum"][mask]
-        if len(adu) == 0:
-            ax.set_title(f"{label} — no data")
-            continue
+    # Bad-gain quality map
+    im2 = axes[1].imshow(bad_gain_map, origin="lower",
+                         aspect="auto", cmap="RdYlGn_r",
+                         vmin=0, vmax=2)
+    cbar = plt.colorbar(im2, ax=axes[1], ticks=[0, 1, 2])
+    cbar.set_ticklabels(["good", "fallback", "kept"])
+    axes[1].set_title("Bad Gain Map (quality)")
+    axes[1].set_xlabel("X [detector column]")
+    axes[1].set_ylabel("Y [detector row]")
 
-        # Show a wider view (±40%) so the user can see the full peak context
-        view_lo = kalpha_adu * 0.60
-        view_hi = kalpha_adu * 1.40
-        ax.hist(adu, bins=150, range=(view_lo, view_hi),
-                color="steelblue", alpha=0.75, label=f"N={len(adu):,}")
-
-        # Mark the fit window
-        ax.axvspan(lo_adu, hi_adu, alpha=0.12, color="red",
-                   label=f"Fit window [{lo_adu:.0f}, {hi_adu:.0f}]")
-
-        if res.success:
-            xs = np.linspace(lo_adu, hi_adu, 300)
-            ys = _gaussian(xs, res.amplitude, res.peak_ev, res.sigma_ev)
-            ax.plot(xs, ys, "r-", lw=2,
-                    label=f"Kα fit: {res.peak_ev:.1f} ADU\n"
-                          f"G = {g:.5f} eV/ADU\n"
-                          f"σ = {res.sigma_ev:.1f} ADU")
-            ax.axvline(res.peak_ev, color="red", lw=1, ls="--")
-            ax.axvline(kalpha_adu,  color="gray", lw=1, ls=":",
-                       label=f"kalpha_adu = {kalpha_adu:.0f}")
-
-        ax.set_xlabel("ADU  (adu_sum, grade-0 single events)")
-        ax.set_ylabel("Counts / bin")
-        ax.set_title(label)
-        ax.legend(fontsize=8)
-        ax.grid(alpha=0.3)
-
-        # Second x-axis in eV using the fitted gain
-        if res.success and g > 0 and np.isfinite(g):
-            ax2 = ax.twiny()
-            ax2.set_xlim(np.array(ax.get_xlim()) * g)
-            ax2.set_xlabel("Energy [eV]  (using fitted gain)", fontsize=8)
-
-    plt.tight_layout()
-    p = out_dir / "cal_phase1_rough_gain.png"
-    fig.savefig(p, dpi=150, bbox_inches="tight")
+    fig.tight_layout()
+    fig.savefig(out_dir / "gain_map.png", dpi=150)
     plt.close(fig)
-    print(f"  → {p}")
+    print(f"  → {out_dir/'gain_map.png'}")
 
 
+def plot_gain_histogram(
+        gain_map:      np.ndarray,
+        bad_gain_map:  np.ndarray,
+        split_even_odd: bool,
+        out_dir:       Path,
+        n_bins:        int = 200,
+) -> None:
+    """Histogram of gain values, optionally split by column parity."""
+    out_dir  = Path(out_dir)
+    good_all = bad_gain_map[0, :] == 0   # row=0 quality for each column
 
-def plot_pixel_gain_map(rough: RoughGainResult,
-                         col_result: ColumnGainResult,
-                         out_dir: Path,
-                         target_ev: float) -> None:
-    """
-    Histogram of the effective per-pixel gain across all columns.
+    fig, ax = plt.subplots(figsize=(8, 5))
 
-    The effective gain for pixel at column X is:
-        G_eff(X) = G_rough(parity) × f_col(X)   [eV/ADU]
+    if split_even_odd:
+        for parity, label, color in [(0, "odd col (p=0)",  "steelblue"),
+                                      (1, "even col (p=1)", "tomato")]:
+            cols   = [c for c in range(gain_map.shape[1])
+                      if (c + 1) % 2 == parity and good_all[c]]
+            if not cols:
+                continue
+            vals   = gain_map[0, cols]
+            vals   = vals[vals > 0]
+            lo, hi = np.percentile(vals, [0.5, 99.5])
+            ax.hist(vals, bins=n_bins, range=(lo, hi),
+                    histtype="step", label=label, color=color, linewidth=1.5)
+    else:
+        vals = gain_map[0, good_all]
+        vals = vals[vals > 0]
+        if len(vals):
+            lo, hi = np.percentile(vals, [0.5, 99.5])
+            ax.hist(vals, bins=n_bins, range=(lo, hi),
+                    histtype="step", color="steelblue", linewidth=1.5)
 
-    This combines the even/odd rough gain from Phase 1 with the
-    per-column fine-tuning factor from Phase 4.
+    ax.set_xlabel("Gain [eV/ADU]")
+    ax.set_ylabel("Columns")
+    ax.set_title("Gain distribution (row 0, good columns)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_dir / "gain_histogram.png", dpi=150)
+    plt.close(fig)
+    print(f"  → {out_dir/'gain_histogram.png'}")
 
-    Panel 1 : G_eff vs column index  (scatter, coloured by parity)
-    Panel 2 : Histogram of G_eff for all columns
-    Panel 3 : f_col vs column index  (Phase 4 fine factor only)
-    """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 
-    n_cols   = len(col_result.f_col)
+def plot_column_peaks(
+        col_peaks,
+        n_cols:   int,
+        out_dir:  Path,
+) -> None:
+    """Per-column peak positions and fallback flags."""
+    out_dir = Path(out_dir)
+    n_halves = col_peaks.ppos.shape[1]
     cols     = np.arange(n_cols)
-    parity   = cols % 2   # 0=even, 1=odd
 
-    g_rough  = np.where(parity == 0,
-                        float(rough.g_even),
-                        float(rough.g_odd)).astype(np.float64)
-    g_eff    = g_rough * col_result.f_col.astype(np.float64)
+    fig, axes = plt.subplots(n_halves, 1,
+                              figsize=(12, 4 * n_halves), squeeze=False)
+    labels = ["bottom half", "top half"] if n_halves == 2 else ["all rows"]
 
-    good     = col_result.success_col
-    g_fitted = g_eff[good]
+    for h in range(n_halves):
+        ax      = axes[h, 0]
+        good    = ~col_peaks.used_fallback[:, h]
+        fallb   = col_peaks.used_fallback[:, h]
+        ax.scatter(cols[good],  col_peaks.ppos[good,  h],
+                   s=4, color="steelblue", label="fit", zorder=3)
+        ax.scatter(cols[fallb], col_peaks.ppos[fallb, h],
+                   s=4, color="tomato",    label="fallback", zorder=3)
+        ax.set_xlabel("Column")
+        ax.set_ylabel("Peak position [ADU]")
+        ax.set_title(f"Per-column orientation peaks — {labels[h]}")
+        ax.legend(markerscale=3)
 
-    fig, axes = plt.subplots(1, 3, figsize=(20, 5))
-    fig.suptitle("Per-Pixel Gain Map  (G_rough × f_col)",
-                 fontsize=13, fontweight="bold")
-
-    # ── Panel 1: G_eff vs column ──────────────────────────────────────────────
-    ax = axes[0]
-    even_cols = cols[(parity == 0) & good]
-    odd_cols  = cols[(parity == 1) & good]
-    ax.scatter(even_cols, g_eff[(parity == 0) & good],
-               s=6, color="#2176ae", alpha=0.7, label="Even cols")
-    ax.scatter(odd_cols,  g_eff[(parity == 1) & good],
-               s=6, color="#f7931e", alpha=0.7, label="Odd cols")
-    # Show unfitted columns as grey
-    if (~good).any():
-        ax.scatter(cols[~good], g_eff[~good],
-                   s=6, color="lightgray", alpha=0.5, label="Default (no fit)")
-    ax.axhline(float(rough.g_even), color="#2176ae", lw=1, ls="--",
-               label=f"G_even = {rough.g_even:.5f}")
-    ax.axhline(float(rough.g_odd),  color="#f7931e", lw=1, ls="--",
-               label=f"G_odd  = {rough.g_odd:.5f}")
-    ax.set_xlabel("Column (X)")
-    ax.set_ylabel("G_eff  [eV / ADU]")
-    ax.set_title("Effective gain per column")
-    ax.legend(fontsize=7)
-    ax.grid(alpha=0.3)
-
-    if len(g_fitted):
-        mean_g = float(g_fitted.mean())
-        std_g  = float(g_fitted.std())
-        ax.text(0.97, 0.03,
-                f"mean = {mean_g:.5f} eV/ADU\n"
-                f"σ    = {std_g:.5f} eV/ADU\n"
-                f"σ/μ  = {std_g/mean_g*100:.2f}%",
-                transform=ax.transAxes, ha="right", va="bottom", fontsize=8,
-                bbox=dict(boxstyle="round", fc="white", alpha=0.85))
-
-    # ── Panel 2: Histogram of G_eff ───────────────────────────────────────────
-    ax2 = axes[1]
-    if len(g_fitted) > 0:
-        lo_g = float(np.percentile(g_fitted, 1))
-        hi_g = float(np.percentile(g_fitted, 99))
-        margin = (hi_g - lo_g) * 0.3
-        lo_g = max(lo_g - margin, 0)
-        hi_g = hi_g + margin
-
-        # Split by parity for stacked histogram
-        g_even_fit = g_eff[(parity == 0) & good]
-        g_odd_fit  = g_eff[(parity == 1) & good]
-
-        bins_g = np.linspace(lo_g, hi_g, 60)
-        ax2.hist(g_even_fit, bins=bins_g, color="#2176ae", alpha=0.65,
-                 label=f"Even (N={len(g_even_fit)})")
-        ax2.hist(g_odd_fit,  bins=bins_g, color="#f7931e", alpha=0.65,
-                 label=f"Odd  (N={len(g_odd_fit)})")
-
-        # Combined stats
-        mean_g = float(g_fitted.mean())
-        std_g  = float(g_fitted.std())
-        ax2.axvline(mean_g, color="black", lw=1.5, ls="-",
-                    label=f"Mean = {mean_g:.5f}")
-        ax2.axvline(float(rough.g_even), color="#2176ae", lw=1.2, ls="--",
-                    label=f"G_even = {rough.g_even:.5f}")
-        ax2.axvline(float(rough.g_odd),  color="#f7931e", lw=1.2, ls="--",
-                    label=f"G_odd  = {rough.g_odd:.5f}")
-        ax2.text(0.97, 0.97,
-                 f"All fitted columns:\n"
-                 f"mean = {mean_g:.5f} eV/ADU\n"
-                 f"std  = {std_g:.5f} eV/ADU\n"
-                 f"σ/μ  = {std_g/mean_g*100:.3f}%",
-                 transform=ax2.transAxes, ha="right", va="top", fontsize=8,
-                 bbox=dict(boxstyle="round", fc="white", alpha=0.85))
-
-    ax2.set_xlabel("G_eff  [eV / ADU]")
-    ax2.set_ylabel("Columns")
-    ax2.set_title("Gain distribution across all columns")
-    ax2.legend(fontsize=8)
-    ax2.grid(alpha=0.3)
-
-    # ── Panel 3: f_col fine factor ────────────────────────────────────────────
-    ax3 = axes[2]
-    ax3.scatter(cols[good],  col_result.f_col[good],
-                s=6, color="steelblue", alpha=0.7,
-                label=f"Fitted ({good.sum()} cols)")
-    if (~good).any():
-        ax3.scatter(cols[~good], col_result.f_col[~good],
-                    s=6, color="lightgray", alpha=0.5,
-                    label=f"Default=1 ({(~good).sum()} cols)")
-    ax3.axhline(1.0, color="k", lw=0.8, ls="--", label="f=1 (no correction)")
-
-    if good.sum() > 0:
-        f_vals = col_result.f_col[good]
-        ax3.text(0.97, 0.03,
-                 f"mean = {f_vals.mean():.4f}\n"
-                 f"std  = {f_vals.std():.4f}\n"
-                 f"min  = {f_vals.min():.4f}\n"
-                 f"max  = {f_vals.max():.4f}",
-                 transform=ax3.transAxes, ha="right", va="bottom", fontsize=8,
-                 bbox=dict(boxstyle="round", fc="white", alpha=0.85))
-
-    ax3.set_xlabel("Column (X)")
-    ax3.set_ylabel("f_col  (fine gain factor)")
-    ax3.set_title("Phase-4 per-column fine factor")
-    ax3.legend(fontsize=8)
-    ax3.grid(alpha=0.3)
-
-    plt.tight_layout()
-    p = out_dir / "cal_pixel_gain_map.png"
-    fig.savefig(p, dpi=150, bbox_inches="tight")
+    fig.tight_layout()
+    fig.savefig(out_dir / "column_peaks.png", dpi=150)
     plt.close(fig)
-    print(f"  → {p}")
+    print(f"  → {out_dir/'column_peaks.png'}")
 
 
+def plot_grade_spectrum(
+        energy_sum:   np.ndarray,
+        grades:       np.ndarray,
+        out_dir:      Path,
+        e_min:        float = 0.0,
+        e_max:        float = 8000.0,
+        n_bins:       int   = 400,
+) -> None:
+    """Calibrated energy spectrum by grade group."""
+    out_dir   = Path(out_dir)
+    bin_edges = np.linspace(e_min, e_max, n_bins + 1)
+    centers   = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    groups = {
+        "singles (g0)":   [0],
+        "doubles (g1-4)": [1, 2, 3, 4],
+        "triples (g5-8)": [5, 6, 7, 8],
+        "quads (g9-12)":  [9, 10, 11, 12],
+        "other (g13)":    [13],
+    }
+    colors = ["steelblue", "tomato", "seagreen", "orange", "grey"]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for (label, gids), color in zip(groups.items(), colors):
+        mask   = np.isin(grades, gids)
+        if not mask.any():
+            continue
+        counts, _ = np.histogram(energy_sum[mask], bins=bin_edges)
+        ax.step(centers, counts, where="mid",
+                label=f"{label} (n={mask.sum():,})",
+                color=color, linewidth=1.2)
+
+    ax.set_xlabel("Energy [eV]")
+    ax.set_ylabel("Counts")
+    ax.set_title("Calibrated spectrum by grade")
+    ax.legend(fontsize=9)
+    ax.set_yscale("log")
+    fig.tight_layout()
+    fig.savefig(out_dir / "grade_spectrum.png", dpi=150)
+    plt.close(fig)
+    print(f"  → {out_dir/'grade_spectrum.png'}")

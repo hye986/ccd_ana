@@ -172,29 +172,31 @@ def _correct_frame(raw: np.ndarray,
     return corrected
 
 
-def _make_worker(cal: dict,
-                 asics: list[str] | None,
-                 noise_map: np.ndarray,
-                 seed_sigma: float,
-                 split_sigma: float,
-                 search_mask: np.ndarray | None,
-                 bad_pixel_mask: np.ndarray | None = None,
-                 sample_buf: list | None = None,
-                 sample_max: int = 50,
-                 asic_slices: dict | None = None,
-                 split_even_odd: bool = False):
-    """
-    Return a closure suitable for process_frames_mt.
+# ── replace the worker ────────────────────────────────────────────────────────
 
-    No grade assignment — raw cluster data only, matching ROOT
-    HStepFilterEvents4 output.
+def _make_worker(cal, asics, noise_map,
+                 seed_sigma, split_sigma,
+                 search_mask,
+                 bad_pixel_mask=None,
+                 sample_buf=None, sample_max=50,
+                 asic_slices=None,
+                 split_even_odd=False):
+    """
+    Return a closure for process_frames_mt.
+    Returns concatenated cluster_data dict (CSR) per chunk.
     """
     import threading
     _lock = threading.Lock()
 
     def _worker(raw_chunk: np.ndarray,
-                frame_indices: np.ndarray) -> np.ndarray:
-        chunk_events: list[np.ndarray] = []
+                frame_indices: np.ndarray) -> dict:
+        chunk_Y:   list[np.ndarray] = []
+        chunk_X:   list[np.ndarray] = []
+        chunk_adu: list[np.ndarray] = []
+        chunk_off: list[np.ndarray] = []   # per-frame offset arrays
+        chunk_flg: list[np.ndarray] = []
+        running_offset = np.int64(0)
+
         for frame in raw_chunk:
             corrected = _correct_frame(frame, cal,
                                        asic_slices=asic_slices,
@@ -205,17 +207,84 @@ def _make_worker(cal: dict,
                     if len(sample_buf) < sample_max:
                         sample_buf.append(corrected.copy())
 
-            evts = find_events(corrected, noise_map,
-                               search_mask=search_mask,
-                               seed_sigma=seed_sigma,
-                               split_sigma=split_sigma,
-                               bad_pixel_mask=bad_pixel_mask)
-            if len(evts):
-                chunk_events.append(evts)
-        if chunk_events:
-            return np.concatenate(chunk_events)
-        return np.empty(0, dtype=EVENT_DTYPE)
+            cd = find_events(corrected, noise_map,
+                             search_mask=search_mask,
+                             seed_sigma=seed_sigma,
+                             split_sigma=split_sigma,
+                             bad_pixel_mask=bad_pixel_mask)
+
+            n_evt = len(cd["flag"])
+            if n_evt == 0:
+                continue
+
+            chunk_Y.append(cd["pixel_Y"])
+            chunk_X.append(cd["pixel_X"])
+            chunk_adu.append(cd["pixel_adu"])
+            # Shift offsets by running total pixel count
+            chunk_off.append(cd["offsets"][:-1] + running_offset)
+            chunk_flg.append(cd["flag"])
+            running_offset += np.int64(len(cd["pixel_Y"]))
+
+        if not chunk_flg:
+            return _empty_cluster_chunk()
+
+        # Merge all frames in this chunk into one CSR block
+        return {
+            "pixel_Y":        np.concatenate(chunk_Y).astype(np.int16),
+            "pixel_X":        np.concatenate(chunk_X).astype(np.int16),
+            "pixel_adu":      np.concatenate(chunk_adu).astype(np.float32),
+            "offsets_no_end": np.concatenate(chunk_off).astype(np.int64),
+            "flag":           np.concatenate(chunk_flg).astype(np.uint8),
+            "n_pixels_total": int(running_offset),
+        }
     return _worker
+
+
+def _empty_cluster_chunk() -> dict:
+    return {
+        "pixel_Y":        np.empty(0, dtype=np.int16),
+        "pixel_X":        np.empty(0, dtype=np.int16),
+        "pixel_adu":      np.empty(0, dtype=np.float32),
+        "offsets_no_end": np.empty(0, dtype=np.int64),
+        "flag":           np.empty(0, dtype=np.uint8),
+        "n_pixels_total": 0,
+    }
+
+
+def _merge_chunks(results: list[dict]) -> dict:
+    """
+    Merge per-chunk CSR dicts into one global CSR cluster_data dict.
+
+    Each chunk's offsets_no_end is shifted by the cumulative pixel count
+    of all previous chunks, then the final sentinel is appended.
+    """
+    non_empty = [r for r in results if r["n_pixels_total"] > 0]
+    if not non_empty:
+        from ..physics.event_filter import _empty_result
+        return _empty_result()
+
+    all_Y   = np.concatenate([r["pixel_Y"]   for r in non_empty])
+    all_X   = np.concatenate([r["pixel_X"]   for r in non_empty])
+    all_adu = np.concatenate([r["pixel_adu"] for r in non_empty])
+    all_flg = np.concatenate([r["flag"]      for r in non_empty])
+
+    # Rebuild global offsets: shift each chunk's offsets by cumulative pixels
+    cum_pixels = np.int64(0)
+    off_parts: list[np.ndarray] = []
+    for r in non_empty:
+        off_parts.append(r["offsets_no_end"] + cum_pixels)
+        cum_pixels += np.int64(r["n_pixels_total"])
+    all_off = np.concatenate(off_parts)
+    # Append final sentinel
+    all_off = np.append(all_off, cum_pixels).astype(np.int64)
+
+    return {
+        "pixel_Y":   all_Y,
+        "pixel_X":   all_X,
+        "pixel_adu": all_adu,
+        "offsets":   all_off,
+        "flag":      all_flg,
+    }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Multi-file path resolution
@@ -411,71 +480,60 @@ def run(cfg: Config) -> dict:
 
     results = all_results
 
-    # Concatenate event arrays from all chunks
-    non_empty = [r for r in results if len(r) > 0]
-    events    = np.concatenate(non_empty) if non_empty else np.empty(0, dtype=EVENT_DTYPE)
-    print(f"\nTotal events: {len(events):,}")
+    # ── Merge chunks ──────────────────────────────────────────────────────────
+    cluster_data = _merge_chunks(all_results)
+    n_events     = len(cluster_data["flag"])
+    print(f"\nTotal events: {n_events:,}")
+    print(f"Total pixels: {len(cluster_data['pixel_Y']):,}")
 
-    # ── Diagnostic summary ─────────────────────────────────────────────────
-    if len(events):
-        # Cluster-size distribution (replaces grade distribution)
-        npix_vals, npix_counts = np.unique(events["n_pixels"],
-                                           return_counts=True)
+    # ── Diagnostic summary ────────────────────────────────────────────────────
+    if n_events > 0:
+        from ..physics.event_filter import n_pixels_per_event, adu_sums
+        npix    = n_pixels_per_event(cluster_data)
+        adusums = adu_sums(cluster_data)
+
+        npix_vals, npix_counts = np.unique(npix, return_counts=True)
         size_dist = {int(n): int(c)
                      for n, c in zip(npix_vals, npix_counts)}
         print(f"  Cluster-size distribution: {size_dist}")
-        print(f"  adu_sum  : min={events['adu_sum'].min():.0f}  "
-              f"max={events['adu_sum'].max():.0f}  "
-              f"median={np.median(events['adu_sum']):.0f}  ADU")
-        print(f"  adu_seed : min={events['adu_seed'].min():.0f}  "
-              f"max={events['adu_seed'].max():.0f}  "
-              f"median={np.median(events['adu_seed']):.0f}  ADU")
+        print(f"  adu_sum: min={adusums.min():.0f}  "
+              f"max={adusums.max():.0f}  "
+              f"median={np.median(adusums):.0f}  ADU")
 
-        # Sanity check: split events should have adu_sum > adu_seed
-        split_mask = events["n_pixels"] > 1
-        n_split    = int(split_mask.sum())
-        if n_split:
-            n_summed = int((events["adu_sum"][split_mask] >
-                            events["adu_seed"][split_mask] + 0.1).sum())
-            print(f"  ✓  {n_summed}/{n_split} multi-pixel events "
-                  f"have adu_sum > adu_seed")
-
-        in_range = int(((events["adu_sum"] >= ec["adu_min"]) &
-                        (events["adu_sum"] <= ec["adu_max"])).sum())
-        if in_range < len(events) * 0.5:
-            print(f"  ⚠  Only {in_range}/{len(events)} events within "
-                  f"adu_min={ec['adu_min']:.0f}..adu_max={ec['adu_max']:.0f}")
-            print(f"     UPDATE adu_min/adu_max in config.")
-
-    # ── Spectra by cluster size ───────────────────────────────────────────
+    # ── Spectra by cluster size ───────────────────────────────────────────────
     bin_edges = np.linspace(ec["adu_min"], ec["adu_max"], ec["n_bins"] + 1)
-    spectra: dict[int, np.ndarray] = {}   # key = n_pixels
-    for n in range(1, 6):   # 1=single .. 5=large
-        m = events["n_pixels"] == n
-        spectra[n], _ = (np.histogram(events["adu_sum"][m], bins=bin_edges)
-                         if m.any() else
+    spectra: dict[int, np.ndarray] = {}
+    if n_events > 0:
+        npix    = n_pixels_per_event(cluster_data)
+        adusums = adu_sums(cluster_data)
+        for n in range(1, 6):
+            m = npix == n
+            spectra[n], _ = (np.histogram(adusums[m], bins=bin_edges)
+                             if m.any() else
+                             (np.zeros(ec["n_bins"], dtype=np.int64), bin_edges))
+        m_large = npix >= 5
+        spectra[5], _ = (np.histogram(adusums[m_large], bins=bin_edges)
+                         if m_large.any() else
                          (np.zeros(ec["n_bins"], dtype=np.int64), bin_edges))
-    # n_pixels >= 5 grouped as "large"
-    m_large = events["n_pixels"] >= 5
-    spectra[5], _ = (np.histogram(events["adu_sum"][m_large], bins=bin_edges)
-                     if m_large.any() else
-                     (np.zeros(ec["n_bins"], dtype=np.int64), bin_edges))
+    else:
+        for n in range(1, 6):
+            spectra[n] = np.zeros(ec["n_bins"], dtype=np.int64)
 
     # ── 2-D maps ──────────────────────────────────────────────────────────────
     hit_count = np.zeros((H, W), dtype=np.int32)
     hit_adu   = np.zeros((H, W), dtype=np.float64)
-    if len(events):
-        np.add.at(hit_count,
-                  (events["Y"].astype(int), events["X"].astype(int)), 1)
-        np.add.at(hit_adu,
-                  (events["Y"].astype(int), events["X"].astype(int)),
-                  events["adu_sum"].astype(np.float64))
+    if n_events > 0:
+        from ..physics.event_filter import seed_pixels, adu_sums as _sums
+        sY, sX, _ = seed_pixels(cluster_data)
+        adusums   = _sums(cluster_data)
+        np.add.at(hit_count, (sY.astype(int), sX.astype(int)), 1)
+        np.add.at(hit_adu,   (sY.astype(int), sX.astype(int)),
+                  adusums.astype(np.float64))
     with np.errstate(invalid="ignore"):
         mean_adu = np.where(hit_count > 0,
                             hit_adu / hit_count, np.nan).astype(np.float32)
 
     # ── Save ──────────────────────────────────────────────────────────────────
-    # Resolve events path from config, default to output_dir/events.h5
     save_events_cfg = ec.get("save_events", "events.h5")
     if save_events_cfg:
         events_path = cfg.resolve_output_path(save_events_cfg)
@@ -483,11 +541,12 @@ def run(cfg: Config) -> dict:
             events_path = cfg.events_path()
         save_events_h5(
             events_path,
-            events, spectra, bin_edges, hit_count, mean_adu,
+            cluster_data, spectra, bin_edges, hit_count, mean_adu,
             metadata={**gen.get("metadata", {}),
                       "source_file":    str(source_run_path),
                       "calibration":    str(calibration_path),
-                      "threshold_sigma": seed_sigma,
+                      "seed_sigma":     seed_sigma,
+                      "split_sigma":    split_sigma,
                       "n_frames":       int(total_frames_processed)},
         )
 

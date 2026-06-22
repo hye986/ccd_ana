@@ -406,22 +406,30 @@ def load_calibration_h5(
 # Event HDF5 save / load
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Cluster / Event HDF5 save & load  (replaces old EVENT_DTYPE-based versions)
+# ──────────────────────────────────────────────────────────────────────────────
+
 def save_events_h5(
-        out_path:  str | Path,
-        events:    np.ndarray,
-        spectra:   dict[int, np.ndarray],   # key = n_pixels (1..5)
-        bin_edges: np.ndarray,
-        hit_count: np.ndarray,
-        mean_adu:  np.ndarray,
-        metadata:  dict | None = None,
+        out_path:     str | Path,
+        cluster_data: dict,
+        spectra:      dict[int, np.ndarray],
+        bin_edges:    np.ndarray,
+        hit_count:    np.ndarray,
+        mean_adu:     np.ndarray,
+        metadata:     dict | None = None,
 ) -> None:
     """
-    Save source-analysis results to HDF5.
+    Save source-analysis results (CSR cluster data) to HDF5.
 
     Structure::
 
-        /events/Y, X, adu_sum, adu_seed, n_pixels, flag
-        /spectra/npix<N>        histogram counts per cluster size
+        /clusters/pixel_Y        int16  (n_pixels_total,)
+        /clusters/pixel_X        int16  (n_pixels_total,)
+        /clusters/pixel_adu      float32(n_pixels_total,)
+        /clusters/offsets        int64  (n_events+1,)
+        /clusters/flag           uint8  (n_events,)
+        /spectra/npix<N>         histogram counts per cluster size
         /spectra/bin_edges
         /maps/hit_count
         /maps/mean_adu
@@ -429,10 +437,9 @@ def save_events_h5(
     """
     print(f"\nSaving events HDF5: {out_path}")
     with h5py.File(out_path, "w") as f:
-        if len(events):
-            eg = f.require_group("events")
-            for field in events.dtype.names:
-                eg.create_dataset(field, data=events[field], compression="gzip")
+        cg = f.require_group("clusters")
+        for key in ("pixel_Y", "pixel_X", "pixel_adu", "offsets", "flag"):
+            cg.create_dataset(key, data=cluster_data[key], compression="gzip")
 
         sg = f.require_group("spectra")
         sg.create_dataset("bin_edges", data=bin_edges)
@@ -448,33 +455,35 @@ def save_events_h5(
             for k, v in metadata.items():
                 mm.attrs[k] = v
 
-    print("  ✓ saved.")
+    n_events = len(cluster_data["offsets"]) - 1
+    n_pixels = len(cluster_data["pixel_Y"])
+    print(f"  ✓ saved  {n_events:,} events  {n_pixels:,} pixels total")
 
 
 def load_events_h5(h5_path: str | Path) -> dict:
     """
     Load source-analysis results from HDF5.
 
-    Returns dict: events, spectra, bin_edges, hit_count, mean_adu, meta.
-    events has fields: Y, X, adu_sum, adu_seed, n_pixels, flag.
-    spectra keys are n_pixels integers (1..5).
+    Returns
+    -------
+    dict with keys:
+        cluster_data : dict (pixel_Y, pixel_X, pixel_adu, offsets, flag)
+        spectra      : dict[int, np.ndarray]  key = n_pixels
+        bin_edges    : np.ndarray
+        hit_count    : np.ndarray
+        mean_adu     : np.ndarray
+        meta         : dict
     """
-    from ..physics.event_filter import EVENT_DTYPE
-
     out: dict = {}
     with h5py.File(h5_path, "r") as f:
-        eg = f.get("events")
-        if eg is not None:
-            n   = len(eg["Y"])
-            arr = np.empty(n, dtype=EVENT_DTYPE)
-            for field in EVENT_DTYPE.names:
-                if field in eg:
-                    arr[field] = eg[field][:]
-                else:
-                    arr[field] = 0   # graceful default for missing fields
-            out["events"] = arr
-        else:
-            out["events"] = np.empty(0, dtype=EVENT_DTYPE)
+        cg = f["clusters"]
+        out["cluster_data"] = {
+            "pixel_Y":   cg["pixel_Y"][:],
+            "pixel_X":   cg["pixel_X"][:],
+            "pixel_adu": cg["pixel_adu"][:],
+            "offsets":   cg["offsets"][:],
+            "flag":      cg["flag"][:],
+        }
 
         sg = f["spectra"]
         out["bin_edges"] = sg["bin_edges"][:]
@@ -491,7 +500,8 @@ def load_events_h5(h5_path: str | Path) -> dict:
         meta = f.get("meta")
         out["meta"] = dict(meta.attrs) if meta is not None else {}
 
-    print(f"  Loaded {len(out['events']):,} events from {h5_path}")
+    n_events = len(out["cluster_data"]["offsets"]) - 1
+    print(f"  Loaded {n_events:,} events from {h5_path}")
     return out
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -936,65 +946,56 @@ def _compute_raw_spectrum_data(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def save_energy_cal_h5(
-        path:        str | Path,
-        rough,       # RoughGainResult
-        cti,         # CtiResult
-        col,         # ColumnGainResult
-        g_even:      float,
-        g_odd:       float,
-        energy_ev:   np.ndarray | None = None,
-        metadata:    dict | None = None,
+        path:         str | Path,
+        gain_map:     np.ndarray,
+        cte_map:      np.ndarray,
+        bad_gain_map: np.ndarray,
+        grades:       np.ndarray,
+        energy_sum:   np.ndarray,
+        cog_row:      np.ndarray,
+        cog_col:      np.ndarray,
+        seed_energy:  np.ndarray,
+        mean_gain:    np.ndarray,
+        metadata:     dict | None = None,
 ) -> None:
     """
-    Write calibration constants to HDF5.
+    Save gain+CTI calibration results to HDF5.
+
+    Structure::
+
+        /gain_map         float64 (n_rows, n_cols)   eV/ADU per pixel
+        /cte_map          float64 (n_rows, n_cols)   cumulative CTE per pixel
+        /bad_gain_map     int8    (n_rows, n_cols)   0=good 1=fallback 2=kept
+        /events/grades    int8    (n_events,)
+        /events/energy_sum  float32 (n_events,)      [eV]
+        /events/cog_row     float32 (n_events,)
+        /events/cog_col     float32 (n_events,)
+        /events/seed_energy float32 (n_events,)      [eV]
+        /mean_gain        float64 (n_parity,)        fallback gain per parity
+        /meta             attrs
     """
-    import h5py
-    from ..physics.gain import MN_KALPHA_EV
-    
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\nSaving gain calibration: {path}")
+    print(f"\nSaving energy calibration: {path}")
 
     with h5py.File(path, "w") as f:
-        # ── Phase 1 ──────────────────────────────────────────────────────────
-        gg = f.require_group("gain")
-        gg.attrs["description"] = "Rough per-parity gain (Phase 1)"
-        gg.create_dataset("g_even",        data=float(g_even))
-        gg.create_dataset("g_odd",         data=float(g_odd))
-        gg.create_dataset("peak_even_adu", data=float(rough.peak_even.peak_ev))
-        gg.create_dataset("peak_odd_adu",  data=float(rough.peak_odd.peak_ev))
-        gg.create_dataset("n_singles",     data=int(rough.n_singles))
+        f.create_dataset("gain_map",     data=gain_map,
+                         compression="gzip")
+        f.create_dataset("cte_map",      data=cte_map,
+                         compression="gzip")
+        f.create_dataset("bad_gain_map", data=bad_gain_map,
+                         compression="gzip")
+        f.create_dataset("mean_gain",    data=mean_gain)
 
-        # ── Phase 3 ──────────────────────────────────────────────────────────
-        cg = f.require_group("cti")
-        cg.attrs["description"] = "CTI coefficient (Phase 3)"
-        cg.create_dataset("cti_coefficient", data=float(cti.cti))
-        cg.create_dataset("e0",              data=float(cti.e0))
-        cg.create_dataset("row_bins",        data=cti.row_bins)
-        cg.create_dataset("peak_per_bin",    data=cti.peak_per_bin)
-        cg.create_dataset("peak_success",    data=cti.peak_success)
-        cg.create_dataset("fit_residuals",   data=cti.fit_residuals)
-        cg.attrs["n_bins_used"] = int(cti.n_bins_used)
+        eg = f.require_group("events")
+        eg.create_dataset("grades",      data=grades,      compression="gzip")
+        eg.create_dataset("energy_sum",  data=energy_sum,  compression="gzip")
+        eg.create_dataset("cog_row",     data=cog_row,     compression="gzip")
+        eg.create_dataset("cog_col",     data=cog_col,     compression="gzip")
+        eg.create_dataset("seed_energy", data=seed_energy, compression="gzip")
 
-        # ── Phase 4 ──────────────────────────────────────────────────────────
-        fg = f.require_group("column_gain")
-        fg.attrs["description"] = "Per-column fine-gain factors (Phase 4)"
-        fg.create_dataset("f_col",         data=col.f_col,         compression="gzip")
-        fg.create_dataset("peak_col",      data=col.peak_col,      compression="gzip")
-        fg.create_dataset("n_events_col",  data=col.n_events_col,  compression="gzip")
-        fg.create_dataset("success_col",   data=col.success_col,   compression="gzip")
-        fg.attrs["n_cols_fit"] = int(col.n_cols_fit)
-
-        # ── Calibrated energies ───────────────────────────────────────────────
-        if energy_ev is not None:
-            eg = f.require_group("calibrated_events")
-            eg.attrs["description"] = "Fully calibrated event energies (Phase 1+3+4)"
-            eg.create_dataset("energy_ev", data=energy_ev, compression="gzip")
-
-        # ── Metadata ─────────────────────────────────────────────────────────
-        mg = f.require_group("meta")
-        mg.attrs["mn_kalpha_ev"] = MN_KALPHA_EV
         if metadata:
+            mg = f.require_group("meta")
             for k, v in metadata.items():
                 try:
                     mg.attrs[k] = v
@@ -1006,35 +1007,39 @@ def save_energy_cal_h5(
 
 def load_energy_cal_h5(path: str | Path) -> dict:
     """
-    Load calibration constants from energy_cal.h5.
+    Load gain+CTI calibration results from HDF5.
+
+    Returns
+    -------
+    dict with keys:
+        gain_map, cte_map, bad_gain_map, mean_gain   — maps
+        grades, energy_sum, cog_row, cog_col, seed_energy — per event
+        meta
     """
-    import h5py
-    
     path = Path(path)
     out: dict = {}
     with h5py.File(path, "r") as f:
-        out["g_even"]        = float(f["gain/g_even"][()])
-        out["g_odd"]         = float(f["gain/g_odd"][()])
-        out["peak_even_adu"] = float(f["gain/peak_even_adu"][()])
-        out["peak_odd_adu"]  = float(f["gain/peak_odd_adu"][()])
-        out["n_singles"]     = int(f["gain/n_singles"][()])
-        out["cti"]           = float(f["cti/cti_coefficient"][()])
-        out["e0"]            = float(f["cti/e0"][()])
-        out["row_bins"]      = f["cti/row_bins"][:]
-        out["peak_per_bin"]  = f["cti/peak_per_bin"][:]
-        out["peak_success"]  = f["cti/peak_success"][:]
-        out["f_col"]         = f["column_gain/f_col"][:]
-        out["peak_col"]      = f["column_gain/peak_col"][:]
-        out["n_events_col"]  = f["column_gain/n_events_col"][:]
-        out["success_col"]   = f["column_gain/success_col"][:]
+        out["gain_map"]     = f["gain_map"][:]
+        out["cte_map"]      = f["cte_map"][:]
+        out["bad_gain_map"] = f["bad_gain_map"][:]
+        out["mean_gain"]    = f["mean_gain"][:]
 
-        # Calibrated energies (optional)
-        if "calibrated_events/energy_ev" in f:
-            out["energy_ev"] = f["calibrated_events/energy_ev"][:]
+        eg = f.get("events")
+        if eg is not None:
+            out["grades"]      = eg["grades"][:]
+            out["energy_sum"]  = eg["energy_sum"][:]
+            out["cog_row"]     = eg["cog_row"][:]
+            out["cog_col"]     = eg["cog_col"][:]
+            out["seed_energy"] = eg["seed_energy"][:]
 
-    print(f"  Loaded gain calibration from {path}")
-    print(f"    g_even={out['g_even']:.4f}  g_odd={out['g_odd']:.4f}  "
-          f"CTI={out['cti']:.3e}  cols_fit={out['success_col'].sum()}")
+        meta = f.get("meta")
+        out["meta"] = dict(meta.attrs) if meta is not None else {}
+
+    print(f"  Loaded energy calibration from {path}")
+    g = out["gain_map"]
+    print(f"    gain_map  shape={g.shape}  "
+          f"mean={g[g>0].mean():.4f} eV/ADU  "
+          f"n_good={(out['bad_gain_map']==0).sum()}")
     return out
 
 

@@ -123,20 +123,20 @@ _DEFAULTS: dict[str, Any] = {
         },
     },
     "energy_cal": {
-        "events_file":       None,
-        "output_file":       None,
-        "target_ev":         5895.0,
-        "kalpha_adu":        None,
-        "kalpha_adu_window": 0.20,
-        "fit_window_frac":   0.15,
-        "rough_min_events":  100,
-        "cti_row_bin_size":  64,
-        "cti_min_events":    50,
-        "cti_grade_filter":  None,
-        "col_min_events":    30,
-        "col_with_bg":       False,
-        "col_grade_filter":  [0],
-        "save_plots":        True,
+        "events_file":     None,
+        "output_file":     None,
+        "target_ev":       5898.8,      # Mn Kα
+        "roi_low":         4000.0,      # ADU  (ROOT ROIlow)
+        "roi_high":        12000.0,     # ADU  (ROOT ROIhigh)
+        "n_params_gauss":  3,           # ROOT NParamsGauss (3-5)
+        "use_ud_split":    False,       # ROOT UseUDSplit
+        "use_all_split":   False,       # ROOT UseAllSplit (enables iterations 1+2)
+        "split_even_odd":  True,        # ROOT SplitEvenOdd
+        "split_frame":     False,       # ROOT SplitFrame (bidirectional readout)
+        "full_frame":      False,       # ROOT FullFrame (frame-store CTI fitted)
+        "cte_relax":       0.5,         # ROOT relaxation factor
+        "max_cte_iter":    10,          # ROOT max inner CTE iterations
+        "save_plots":      True,
     },
 }
 
@@ -330,10 +330,12 @@ event_rec:
                                     # matches ROOT Analysis.Filter.SplitEvenOdd 1
                                     # MUST match the value used in the offset stage
   noise_scope: auto
-  reject_extra: false               # discard grade-13 "other" events from output
-  adu_min: 0.0
-  adu_max: 10000.0
-  n_bins: 1000
+  adu_min: 0.0                      # lower bound for spectra histograms [ADU]
+  adu_max: 10000.0                  # upper bound for spectra histograms [ADU]
+                                    # NOTE: these are only for the output spectra/hit maps,
+                                    # NOT for event acceptance — all events above split_sigma
+                                    # are kept regardless of adu_min/adu_max
+  n_bins: 1000                      # histogram bins for spectra
   save_events: events.h5            # relative to output_dir (null to skip)
   prefer_offset: sigclip            # sigclip | median
   bad_pixel_mask:
@@ -346,19 +348,76 @@ event_rec:
 energy_cal:
   events_file: null                 # null = {output_dir}/events.h5
   output_file: null                 # null = {output_dir}/energy_cal.h5
-  target_ev: 5895.0                 # Mn Kα reference energy [eV]
-  kalpha_adu: 15000                 # REQUIRED: Kα peak position in ADU
-                                    # read from event_rec spectrum (single-pixel peak)
-  kalpha_adu_window: 0.20           # Phase 1 fit window ± fraction of kalpha_adu
-  fit_window_frac: 0.15             # Phases 3+4 fit window ± fraction of target_ev [eV]
-  rough_min_events: 100
-  cti_row_bin_size: 64
-  cti_min_events: 50
-  cti_grade_filter: null            # null = all grades; or e.g. [0,1,2,3,4]
-  col_min_events: 30
-  col_with_bg: false
-  col_grade_filter: [0]
-  save_plots: true
+
+  # ── Calibration line ───────────────────────────────────────────────────────
+  target_ev: 5898.8                 # Mn Kα reference energy [eV]
+                                    # Mn Kβ = 6490.4 eV (not used by default)
+
+  # ── ADU region of interest ─────────────────────────────────────────────────
+  # Set these by inspecting the single-pixel peak in the event_rec spectrum.
+  # Rule of thumb: set roi_low  ~  0.5 × expected_peak_adu
+  #                set roi_high ~  1.5 × expected_peak_adu
+  # Example for Fe55 at ~7 ADU/eV: peak ≈ 41000 ADU → roi [20000, 62000]
+  # Example for Fe55 at ~0.3 ADU/eV: peak ≈ 1800 ADU → roi [900, 2700]
+  roi_low: 4000.0                   # ROOT Analysis.Calib.ROIlow  [ADU]
+  roi_high: 12000.0                 # ROOT Analysis.Calib.ROIhigh [ADU]
+
+  # ── Gaussian peak fitting ──────────────────────────────────────────────────
+  n_params_gauss: 3                 # ROOT Analysis.Calib.NParamsGauss
+                                    # 3 = pure Gaussian (amplitude, mean, sigma)
+                                    # 4 = Gaussian + constant background
+                                    # 5 = Gaussian + linear background
+
+  # ── Event selection ────────────────────────────────────────────────────────
+  use_ud_split: false               # ROOT Analysis.Calib.UseUDSplit
+                                    # include same-column 2-pixel splits in iteration 0
+                                    # useful when single statistics are low
+
+  use_all_split: false              # ROOT Analysis.Calib.UseAllSplit
+                                    # enable iterations 1+2 using all cluster sizes
+                                    # requires gain_map from iteration 0 as starting point
+                                    # set true for best statistics / final calibration
+
+  # ── Column and row splitting ───────────────────────────────────────────────
+  split_even_odd: true              # ROOT Analysis.Calib.SplitEvenOdd
+                                    # separate global peak fallback for even/odd columns
+                                    # corrects systematic gain difference between
+                                    # alternating readout channels
+                                    # MUST match event_rec.split_even_odd
+
+  split_frame: false                # ROOT Analysis.Calib.SplitFrame
+                                    # true  = sensor has two readout directions
+                                    #         (top half reads downward from row N-1,
+                                    #          bottom half reads upward from row 0)
+                                    # false = single readout direction (frame-store mode)
+                                    # For pnCCD single hybrid: typically false
+
+  full_frame: false                 # ROOT Analysis.Calib.FullFrame
+                                    # true  = frame-store CTE also fitted (CTEfs)
+                                    # false = frame-store CTE fixed to 1.0 (CTEfs = 1)
+                                    # Only relevant when split_frame: true or sensor
+                                    # has a physical frame-store region
+
+  # ── CTE fit parameters ─────────────────────────────────────────────────────
+  cte_relax: 0.5                    # ROOT relaxation factor for CTE update
+                                    # CTE_new = CTE_old × fitted_CTE^relax
+                                    # range 0.3–0.7; lower = more stable, slower
+                                    # 0.5 matches ROOT default
+
+  max_cte_iter: 10                  # ROOT maximum inner CTE sub-iterations per column
+                                    # fit stops early if convergence criteria met:
+                                    #   peak position change < 1%
+                                    #   |CTE - 1| < 5e-6 for all CTE parameters
+
+  # ── Output ─────────────────────────────────────────────────────────────────
+  save_plots: true                  # generate diagnostic plots:
+                                    #   gain_map.png        — 2D gain [eV/ADU]
+                                    #   gain_histogram.png  — gain distribution
+                                    #   column_peaks.png    — per-column peak positions
+                                    #   cte_map.png         — 2D cumulative CTE
+                                    #   cti_summary.png     — CTI per column + histogram
+                                    #   signal_vs_row.png   — CTI effect visualisation
+                                    #   grade_spectrum.png  — spectrum by grade
 """
 
 
