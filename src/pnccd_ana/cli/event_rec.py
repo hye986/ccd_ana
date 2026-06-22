@@ -127,14 +127,18 @@ def _correct_frame(raw: np.ndarray,
                    cal: dict,
                    asic_slices: dict | None = None,
                    bad_pixel_mask: np.ndarray | None = None,
-                   n_bits: int = 16) -> np.ndarray:
+                   n_bits: int = 16,
+                   split_even_odd: bool = False) -> np.ndarray:
     """
     Offset subtract + CM correct one raw frame.
 
     Overflow and underflow sentinel values are detected from the raw
     integer frame BEFORE offset subtraction and excluded from the CM
-    median, matching ROOT HCommonModeMedian which sets bad/overflow pixels
-    to +inf before nth_element.
+    median, matching ROOT HCommonModeMedian.
+
+    When split_even_odd=True, uses HCommonModeMedianEvenOdd logic:
+    independent medians for even- and odd-indexed columns within each
+    ASIC segment (matching Analysis.Filter.SplitEvenOdd=1).
 
     Parameters
     ----------
@@ -143,14 +147,14 @@ def _correct_frame(raw: np.ndarray,
     asic_slices    : ASIC geometry for per-ASIC CM (None = full-row CM)
     bad_pixel_mask : bool (n_Y, n_X) or None — static bad pixels
     n_bits         : ADC bit depth (default 16)
+    split_even_odd : separate even/odd column medians per ASIC
 
     Returns
     -------
     corrected : float32 (n_Y, n_X)
     """
-    overflow_val = (1 << n_bits) - 1   # 65535 for 16-bit
+    overflow_val = (1 << n_bits) - 1
 
-    # Detect sentinels on raw integer values BEFORE any arithmetic
     if np.issubdtype(raw.dtype, np.integer):
         overflow_mask  = (raw == overflow_val)
         underflow_mask = (raw == 0)
@@ -166,6 +170,7 @@ def _correct_frame(raw: np.ndarray,
         bad_pixel_mask=bad_pixel_mask,
         overflow_mask=overflow_mask,
         underflow_mask=underflow_mask,
+        split_even_odd=split_even_odd,
     )
     return corrected
 
@@ -180,10 +185,13 @@ def _make_worker(cal: dict,
                  bad_pixel_mask: np.ndarray | None = None,
                  sample_buf: list | None = None,
                  sample_max: int = 50,
-                 asic_slices: dict | None = None):
+                 asic_slices: dict | None = None,
+                 split_even_odd: bool = False):
     """
     Return a closure suitable for process_frames_mt for single-hybrid mode.
 
+    split_even_odd is forwarded to _correct_frame so that CM uses
+    independent even/odd column medians per ASIC (ROOT SplitEvenOdd=1).
     bad_pixel_mask is forwarded to _correct_frame so that bad pixels
     are excluded from the CM median (matching ROOT HCommonModeMedian).
     """
@@ -196,7 +204,8 @@ def _make_worker(cal: dict,
         for frame in raw_chunk:
             corrected = _correct_frame(frame, cal,
                                        asic_slices=asic_slices,
-                                       bad_pixel_mask=bad_pixel_mask)
+                                       bad_pixel_mask=bad_pixel_mask,
+                                       split_even_odd=split_even_odd)
 
             if sample_buf is not None:
                 with _lock:
@@ -360,12 +369,16 @@ def run(cfg: Config) -> dict:
     # Shared across all input files — worker appends to it as frames are processed.
     sample_buf: list = []
 
+    split_even_odd = bool(ec.get("split_even_odd", True))
+    print(f"  Even/odd CM split: {'enabled' if split_even_odd else 'disabled'}")
+
     worker = _make_worker(cal, asics, noise_map,
                           seed_sigma, split_sigma, reject_extra,
                           search_mask,
                           bad_pixel_mask=bad_pixel_mask,
                           sample_buf=sample_buf, sample_max=200,
-                          asic_slices=asic_slices)
+                          asic_slices=asic_slices,
+                          split_even_odd=split_even_odd)
 
     all_results: list[np.ndarray] = []
     remaining = effective_max

@@ -25,22 +25,20 @@ Algorithm (matches ROOT HStepFilterEvents4)
   4. SHAPE CLASSIFICATION
      Within the accepted cluster:
        · seed     = pixel with maximum ADU value
-       · offsets  = (dY, dX) of every other pixel relative to seed
+       · offsets  = frozenset of (dY, dX) of every other pixel relative to seed
        · grade    = _GRADE_LOOKUP.get(frozenset(offsets), GRADE_OTHER)
+
+     NOTE on quadruples (grades 9–12):
+       A 2×2 block has 4 pixels.  When the seed (argmax) is at one corner,
+       the other 3 pixels produce offsets that always include a diagonal.
+       Example: seed at bottom-left (0,0), others at (1,0),(0,1),(1,1):
+         offsets = {(+1,0),(0,+1),(+1,+1)} → grade 9.
+       If the diagonal pixel falls below split_sigma its ADU is excluded
+       and the cluster becomes a triple → grade 5/6/7/8.
+       Lowering split_sigma recovers the diagonal pixel.
 
   5. ADU SUM
      Sum ALL pixels in the cluster regardless of grade.
-
-Why the seed = argmax is noise-sensitive for split events
-──────────────────────────────────────────────────────────
-  For a 2×2 quadruple with nearly equal charge sharing, thermal noise
-  can shift which pixel is argmax frame-by-frame.  Each shift changes
-  the frozenset of neighbour offsets and may mis-classify the event as
-  GRADE_OTHER.  ROOT avoids this by storing raw clusters and classifying
-  grade in a separate downstream step with gain-corrected values.
-  Here we mitigate by trying ALL pixels as seed candidate and accepting
-  the grade that matches a known pattern; only if no candidate yields a
-  known grade do we assign GRADE_OTHER.
 
 Grade definitions — SINGLE SOURCE OF TRUTH
 ────────────────────────────────────────────
@@ -52,25 +50,31 @@ Grade definitions — SINGLE SOURCE OF TRUTH
    2  double      (+1, 0)
    3  double      (0,-1)
    4  double      (-1, 0)
-   5  triple      (+1, 0)+(0,+1)
-   6  triple      (0,-1)+(+1, 0)
-   7  triple      (-1, 0)+(0,-1)
-   8  triple      (-1, 0)+(0,+1)
-   9  quadruple   (+1, 0)+(0,+1)+(+1,+1)
-  10  quadruple   (+1, 0)+(0,-1)+(+1,-1)
-  11  quadruple   (-1, 0)+(0,-1)+(-1,-1)
-  12  quadruple   (-1, 0)+(0,+1)+(-1,+1)
-  13  T-left      (+1, 0)+(0,+1)+(-1, 0)
-  14  T-right     (+1, 0)+(0,-1)+(-1, 0)
-  15  b-left      (+1, 0)+(0,+1)+(-1, 0)+(-1,+1)
-  16  b-right     (+1, 0)+(0,-1)+(-1, 0)+(-1,-1)
-  17  I-shape     (+1, 0)+(-1, 0)
-  18  other       any cluster shape not listed above
+   5  triple      (+1, 0)+(0,+1)              L bottom-left corner
+   6  triple      (0,-1)+(+1, 0)              L bottom-right corner
+   7  triple      (-1, 0)+(0,-1)              L top-right corner
+   8  triple      (-1, 0)+(0,+1)              L top-left corner
+   9  quadruple   (+1, 0)+(0,+1)+(+1,+1)     2×2 seed=bottom-left
+  10  quadruple   (+1, 0)+(0,-1)+(+1,-1)     2×2 seed=bottom-right
+  11  quadruple   (-1, 0)+(0,-1)+(-1,-1)     2×2 seed=top-right
+  12  quadruple   (-1, 0)+(0,+1)+(-1,+1)     2×2 seed=top-left
+  13  other       any cluster shape not listed above
 
 Coordinate convention
 ──────────────────────
   data[Y, X]   Y = row (axis 0),  X = col (axis 1)
   Y = 0 is the first readout row (rolling shutter bottom).
+
+Why quadruples show flat enhancement
+──────────────────────────────────────
+  ROOT classifies grade in a downstream gain-calibration step, not in the
+  filter step.  The filter stores raw clusters; grade is assigned after gain
+  correction when charge sharing is better resolved.  Here we classify in
+  find_events directly, so grade depends on whether the diagonal pixel
+  exceeds split_sigma × noise.  If split_sigma is too high, many genuine
+  2×2 quadruples lose their diagonal pixel and fall into GRADE_OTHER,
+  creating the flat enhancement.  Lowering split_sigma (e.g. from 3→2) or
+  using the even/odd CM correction (which reduces noise) recovers them.
 """
 
 from __future__ import annotations
@@ -102,16 +106,11 @@ _GRADE_DEFS: list[tuple[int, str, frozenset]] = [
     ( 10, "quadruple", frozenset({(+1, 0), ( 0,-1), (+1,-1)})),
     ( 11, "quadruple", frozenset({(-1, 0), ( 0,-1), (-1,-1)})),
     ( 12, "quadruple", frozenset({(-1, 0), ( 0,+1), (-1,+1)})),
-    ( 13, "T-left",    frozenset({(+1, 0), ( 0,+1), (-1, 0)})),
-    ( 14, "T-right",   frozenset({(+1, 0), ( 0,-1), (-1, 0)})),
-    ( 15, "b-left",    frozenset({(+1, 0), ( 0,+1), (-1, 0), (-1,+1)})),
-    ( 16, "b-right",   frozenset({(+1, 0), ( 0,-1), (-1, 0), (-1,-1)})),
-    ( 17, "I-shape",   frozenset({(+1, 0), (-1, 0)})),
 ]
 
-GRADE_OTHER    = 18
+GRADE_OTHER    = 13
 GRADE_REJECTED = -1   # internal sentinel, never stored in output
-N_GRADES       = GRADE_OTHER + 1   # 0..18 inclusive
+N_GRADES       = GRADE_OTHER + 1   # 0..13 inclusive
 
 GRADE_NAMES: dict[int, str] = {g: name for g, name, _ in _GRADE_DEFS}
 GRADE_NAMES[GRADE_OTHER] = "other"
@@ -125,7 +124,6 @@ _GRADE_DEFS_BY_ID: dict[int, tuple[str, frozenset]] = {
     gid: (label, offsets) for gid, label, offsets in _GRADE_DEFS
 }
 
-# Pre-built set of all known offset frozensets for fast membership test
 _KNOWN_OFFSET_SETS: set[frozenset] = {offsets for _, _, offsets in _GRADE_DEFS}
 
 
@@ -188,11 +186,9 @@ def _find_clusters(sec_mask: np.ndarray) -> np.ndarray:
     n_Y, n_X  = sec_mask.shape
     label_map = np.zeros((n_Y, n_X), dtype=np.int32)
 
-    # parent[i] = root of label i; label 0 = background (unused)
     parent: list[int] = [0]
 
     def _find(x: int) -> int:
-        # Iterative path-halving (safe for large trees)
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
@@ -202,21 +198,17 @@ def _find_clusters(sec_mask: np.ndarray) -> np.ndarray:
         ra, rb = _find(a), _find(b)
         if ra == rb:
             return ra
-        # Smaller root wins (consistent with ROOT which keeps lower EventID)
         keep, drop = (ra, rb) if ra < rb else (rb, ra)
         parent[drop] = keep
         return keep
 
-    # Raster-scan: Y=0 first, left to right — same order as ROOT MaskIndices
-    flat_idx = np.flatnonzero(sec_mask)   # already in raster order
+    flat_idx = np.flatnonzero(sec_mask)
 
     for idx in flat_idx:
         y = int(idx // n_X)
         x = int(idx  % n_X)
 
-        # Left neighbour: same row, col-1  (ROOT: ThisIndex-1)
-        left_label = int(label_map[y, x - 1]) if x > 0 else 0
-        # Below neighbour: row-1, same col  (ROOT: ThisIndex-ColCount)
+        left_label  = int(label_map[y, x - 1]) if x > 0 else 0
         below_label = int(label_map[y - 1, x]) if y > 0 else 0
 
         left_root  = _find(left_label)  if left_label  else 0
@@ -234,7 +226,6 @@ def _find_clusters(sec_mask: np.ndarray) -> np.ndarray:
             merged = _union(left_root, below_root)
             label_map[y, x] = merged
 
-    # Flatten: resolve all labels to their canonical root
     for idx in flat_idx:
         y = int(idx // n_X)
         x = int(idx  % n_X)
@@ -255,12 +246,12 @@ def _classify_cluster(ys: np.ndarray,
 
     The grade is determined by the frozenset of (dY, dX) offsets of all
     other pixels relative to the seed (argmax) pixel.  This matches ROOT
-    which uses the pixel with maximum ADU as the seed.
+    HStepFilterEvents4 which collects all pixels above ThresSec into a
+    cluster and uses the highest-ADU pixel as the reference for shape lookup.
 
-    If the argmax seed gives GRADE_OTHER, we do NOT try other seeds —
-    the shape is genuinely unrecognised.  The multi-seed fallback was
-    incorrect: for a 2×2 quadruple it always returned grade 9 regardless
-    of which corner was the true argmax, making grades 10/11/12 impossible.
+    For 2×2 quadruples: the diagonal pixel must also be above split_sigma
+    to appear in the cluster.  If it is not, the pattern becomes a triple.
+    This is physically correct: ROOT uses the same two-threshold scheme.
 
     Parameters
     ----------
@@ -317,9 +308,12 @@ def find_events(
 
     4. Within each accepted cluster:
          seed     = pixel with maximum ADU
-         grade    = _classify_cluster (tries all seed candidates to
-                    recover near-equal-charge-sharing events)
+         grade    = _classify_cluster (argmax seed, no multi-seed fallback)
          flag     = OR of per-pixel flags (border / overflow / underflow)
+
+       Quadruple grades 9–12 require the diagonal pixel to also be above
+       split_sigma.  If not, the event is classified as triple or other.
+       Lowering split_sigma recovers more quadruples.
 
     5. adu_sum  = sum of ALL cluster pixels
        adu_seed = ADU of the seed (argmax) pixel
@@ -346,8 +340,7 @@ def find_events(
     H, W  = frame.shape
 
     # ── Border mask ───────────────────────────────────────────────────────────
-    # Flags pixels on the detector edge.  ROOT sets kPixBorder but does NOT
-    # exclude border pixels from seeding — flag is for downstream filtering.
+    # ROOT sets kPixBorder but does NOT exclude border pixels from seeding.
     border_mask = np.zeros((H, W), dtype=bool)
     if flag_border:
         border_mask[0,  :]  = True
@@ -356,6 +349,10 @@ def find_events(
         border_mask[:, -1]  = True
 
     # ── Build combined exclusion mask and zero excluded pixels ────────────────
+    # Excluded pixels cannot be seeds or cluster members.
+    # This matches ROOT which skips underflow pixels in the threshold scan
+    # and uses a BadPixels mask to exclude them from CM but NOT from the
+    # frame (bad pixels still get CM subtracted).
     include: np.ndarray | None = None
     if search_mask is not None:
         include = search_mask.astype(bool, copy=False)
@@ -370,12 +367,12 @@ def find_events(
     prim_thr = (seed_sigma  * noise).astype(np.float32)
     sec_thr  = (split_sigma * noise).astype(np.float32)
 
-    # ROOT: if ThresSec[px] > ThresPrm[px] or not finite → ThresSec = ThresPrm
+    # ROOT: ThresSec clamped to ThresPrm per pixel
     if clamp_sec_to_prim:
         np.minimum(sec_thr, prim_thr, out=sec_thr)
 
-    prim_mask = frame > prim_thr   # must have ≥1 per cluster
-    sec_mask  = frame > sec_thr    # defines cluster extent (⊇ prim_mask)
+    prim_mask = frame > prim_thr
+    sec_mask  = frame > sec_thr    # ⊇ prim_mask after clamping
 
     if not sec_mask.any():
         return np.empty(0, dtype=EVENT_DTYPE)
@@ -384,13 +381,6 @@ def find_events(
     label_map = _find_clusters(sec_mask)
 
     # ── Cluster IDs that contain ≥1 primary pixel ─────────────────────────────
-    primary_labels = set(
-        int(v) for v in np.unique(label_map[prim_mask]) if v > 0
-    )
-    if not primary_labels:
-        return np.empty(0, dtype=EVENT_DTYPE)
-
-        # ── Cluster IDs that contain ≥1 primary pixel ─────────────────────────────
     primary_labels = set(
         int(v) for v in np.unique(label_map[prim_mask]) if v > 0
     )
@@ -407,26 +397,22 @@ def find_events(
 
     for cid in primary_labels:
         pix_mask = label_map == cid
-        ys, xs   = np.nonzero(pix_mask)        # pixel coordinates
+        ys, xs   = np.nonzero(pix_mask)
         vals     = frame[ys, xs]
 
-        # Seed = maximum ADU pixel (ROOT: first hit over ThresPrm in sorted
-        # order, but effectively argmax for the dominant pixel)
+        # Seed = maximum ADU pixel (matches ROOT argmax)
         seed_idx = int(np.argmax(vals))
         sy       = int(ys[seed_idx])
         sx       = int(xs[seed_idx])
         seed_val = float(vals[seed_idx])
 
-        # ── Shape classification using argmax seed ────────────────────────────
-        # Grade is determined by offsets relative to the argmax pixel.
-        # Matches ROOT HStepFilterEvents4 which uses the pixel with maximum
-        # ADU as the reference for pattern classification.
+        # Grade from argmax seed — no multi-seed fallback
         grade = _classify_cluster(ys, xs, seed_idx)
 
         if reject_extra and grade == GRADE_OTHER:
             continue
 
-        # ── Per-event flag (OR of per-pixel flags) ────────────────────────────
+        # Per-event flag (OR of per-pixel flags)
         evt_flag = np.uint8(0)
         if flag_border and border_mask[ys, xs].any():
             evt_flag |= FLAG_BORDER

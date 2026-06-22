@@ -43,7 +43,8 @@ def _analyse_scope(data:          np.ndarray,
                    out_dir:       Path,
                    asic_slices:   dict[str, tuple[int, int, int, int]] | None = None,
                    build_bp_mask: bool = True,
-                   active_mask:   np.ndarray | None = None) -> dict:
+                   active_mask:   np.ndarray | None = None,
+                   split_even_odd: bool = False) -> dict:
     """
     Run offset → CM → noise pipeline for one data block.
 
@@ -77,7 +78,7 @@ def _analyse_scope(data:          np.ndarray,
 
     ref_offset = r.get("offset_sigclip", r.get("offset_median"))
     corrected, cm_map, asic_names = apply_common_mode_correction(
-        data, ref_offset, label, asic_slices=asic_slices)
+        data, ref_offset, label, asic_slices=asic_slices, split_even_odd=split_even_odd)
     r["noise"]    = compute_noise(corrected, keep_mask, label)
     r["cm_noise"] = compute_cm_noise(cm_map, label, asic_names=asic_names)
     r["cm_map"]         = cm_map
@@ -238,9 +239,11 @@ def run(cfg: Config) -> dict:
 
     # ── Run analysis ──────────────────────────────────────────────────────────
     all_results: dict = {}
+    split_even_odd = bool(oc.get("split_even_odd", True))
     all_results["global"] = _analyse_scope(
         data_raw, "global", methods, n_sigma, out_dir,
-        asic_slices=asic_slices, build_bp_mask=True, active_mask=active_mask)
+        asic_slices=asic_slices, build_bp_mask=True, active_mask=active_mask,
+        split_even_odd=split_even_odd)
 
     # ── Save primary calibration ──────────────────────────────────────────────
     def _strip(r: dict) -> dict:

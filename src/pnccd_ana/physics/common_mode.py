@@ -12,7 +12,12 @@ interference in the correction.
 
 Array layout: data[frame, Y, X]
 CM is computed per ASIC: median over ASIC_WIDTH X pixels for each Y row.
-Resulting cm_map shape: (n_frames, n_Y, n_asics)
+
+SplitEvenOdd mode (matching ROOT HCommonModeMedianEvenOdd / Analysis.Filter.SplitEvenOdd=1):
+  Within each ASIC segment, compute separate medians for even-indexed and
+  odd-indexed columns (software column index, 0-based).  Each median is
+  subtracted only from its own parity columns.  This corrects for the
+  correlated noise pattern seen on alternating readout channels in pnCCDs.
 
 Overflow/underflow handling
 ---------------------------
@@ -41,8 +46,6 @@ def _masked_median_axis1(data: np.ndarray,
     Matches ROOT HCommonModeMedian: bad pixels set to +inf before partial
     sort so they never contribute to the median count.
 
-    Uses fully vectorised numpy — no Python row loops.
-
     Parameters
     ----------
     data : float32 (n_Y, n_cols)
@@ -53,42 +56,59 @@ def _masked_median_axis1(data: np.ndarray,
     medians : float32 (n_Y,)
     """
     if bad is None:
-        # Fast path: no exclusions — single numpy call
         return np.median(data, axis=1).astype(np.float32)
 
-    # Masked path: set excluded pixels to +inf then use partition
-    # np.partition is O(n) per row — much faster than sort
     buf = data.astype(np.float32, copy=True)
     buf[bad] = np.inf
 
     n_Y, n_cols = buf.shape
+    n_good = np.isfinite(buf).sum(axis=1)   # (n_Y,)
 
-    # Count finite pixels per row — vectorised
-    n_good = np.isfinite(buf).sum(axis=1)   # (n_Y,)  int
+    # Full sort — n_cols is small (64 per ASIC), so this is fast
+    sorted_buf = np.sort(buf, axis=1)       # inf floats to right end
 
-    # Sort only the finite portion using partition trick:
-    # partition to position n_good//2 gives us the lower median element,
-    # and n_good//2 - 1 gives upper for even counts.
-    # We do a full sort here because n_cols is small (64 per ASIC)
-    # and np.sort on (n_Y, 64) is fast.
-    sorted_buf = np.sort(buf, axis=1)       # (n_Y, n_cols) — inf at right end
+    lo = n_good // 2
+    hi = np.maximum(lo - 1, 0)
 
-    # Lower median index per row
-    lo = n_good // 2                        # (n_Y,)
-    hi = np.maximum(lo - 1, 0)             # (n_Y,) for even-count correction
+    rows  = np.arange(n_Y)
+    lower = sorted_buf[rows, lo]
+    upper = sorted_buf[rows, hi]
 
-    rows = np.arange(n_Y)
-    lower = sorted_buf[rows, lo]            # (n_Y,)
-    upper = sorted_buf[rows, hi]            # (n_Y,)
-
-    # Even n_good: average two middle values; odd: lower == result
     even_mask = (n_good > 0) & ((n_good & 1) == 0)
     medians   = np.where(even_mask, (lower + upper) * 0.5, lower)
-
-    # Rows with no good pixels → NaN
-    medians = np.where(n_good == 0, np.nan, medians)
+    medians   = np.where(n_good == 0, np.nan, medians)
 
     return medians.astype(np.float32)
+
+
+def _masked_median_parity(data: np.ndarray,
+                           bad:  np.ndarray | None,
+                           parity: int) -> np.ndarray:
+    """
+    Compute median along axis=1 for even (parity=0) or odd (parity=1)
+    column indices only, excluding bad pixels.
+
+    Matches ROOT HCommonModeMedianEvenOdd which separates even/odd columns
+    within each segment and computes independent medians.
+
+    Parameters
+    ----------
+    data   : float32 (n_Y, n_cols)  — full ASIC slice
+    bad    : bool   (n_Y, n_cols) or None
+    parity : 0 for even columns, 1 for odd columns
+
+    Returns
+    -------
+    medians : float32 (n_Y,)
+    """
+    # Select columns by parity (0-based column index within the ASIC slice)
+    col_indices = np.arange(data.shape[1])
+    sel = col_indices[col_indices % 2 == parity]   # e.g. [0,2,4,...] or [1,3,5,...]
+
+    sub_data = data[:, sel].astype(np.float32, copy=True)  # (n_Y, n_sel)
+    sub_bad  = bad[:, sel] if bad is not None else None
+
+    return _masked_median_axis1(sub_data, sub_bad)
 
 
 def _make_bad_mask(bad_pixel_mask: np.ndarray | None,
@@ -117,9 +137,14 @@ def cm_correct_frame_per_asic(
         bad_pixel_mask: np.ndarray | None = None,
         overflow_mask:  np.ndarray | None = None,
         underflow_mask: np.ndarray | None = None,
+        split_even_odd: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Apply CM correction to a single 2-D residual frame (Y, X) per ASIC.
+
+    When split_even_odd=True, computes independent medians for even- and
+    odd-indexed columns within each ASIC segment, matching ROOT
+    HCommonModeMedianEvenOdd / Analysis.Filter.SplitEvenOdd=1.
 
     Bad pixels, overflow, and underflow are excluded from the median
     (set to +inf before sort, matching ROOT HCommonModeMedian).
@@ -133,11 +158,13 @@ def cm_correct_frame_per_asic(
     bad_pixel_mask  : bool (n_Y, n_X) or None
     overflow_mask   : bool (n_Y, n_X) or None
     underflow_mask  : bool (n_Y, n_X) or None
+    split_even_odd  : if True, use separate even/odd column medians
+                      (ROOT HCommonModeMedianEvenOdd)
 
     Returns
     -------
     corrected  : float32 (n_Y, n_X)
-    cm_values  : float32 (n_Y, n_asics)
+    cm_values  : float32 (n_Y, n_asics) — mean of even+odd medians per ASIC row
     asic_names : ndarray of ASIC name strings
     """
     n_Y     = residual.shape[0]
@@ -145,7 +172,6 @@ def cm_correct_frame_per_asic(
     cm_values = np.zeros((n_Y, n_asics), dtype=np.float32)
     corrected = residual.astype(np.float32, copy=True)
 
-    # Build combined bad mask once for the whole frame
     bad_full = _make_bad_mask(bad_pixel_mask, overflow_mask, underflow_mask)
 
     asic_names = sorted(asic_slices.keys())
@@ -155,13 +181,40 @@ def cm_correct_frame_per_asic(
         asic_data = residual[:, x0:x1].astype(np.float32)
         bad_asic  = bad_full[:, x0:x1] if bad_full is not None else None
 
-        cm_col = _masked_median_axis1(asic_data, bad_asic)   # (n_Y,)
+        if split_even_odd:
+            # ROOT HCommonModeMedianEvenOdd: independent median per parity
+            cm_even = _masked_median_parity(asic_data, bad_asic, parity=0)  # (n_Y,)
+            cm_odd  = _masked_median_parity(asic_data, bad_asic, parity=1)  # (n_Y,)
 
-        # NaN CM (all-bad row) → subtract 0
-        cm_safe = np.where(np.isfinite(cm_col), cm_col, 0.0).astype(np.float32)
+            cm_even_safe = np.where(np.isfinite(cm_even), cm_even, 0.0).astype(np.float32)
+            cm_odd_safe  = np.where(np.isfinite(cm_odd),  cm_odd,  0.0).astype(np.float32)
 
-        cm_values[:, i]    = cm_col
-        corrected[:, x0:x1] = asic_data - cm_safe[:, np.newaxis]
+            # Subtract parity-specific medians from ALL columns (including bad)
+            # matching ROOT: Frame[seg + i] -= EvenMedian  (for even i)
+            col_indices = np.arange(asic_data.shape[1])
+            even_cols = col_indices[col_indices % 2 == 0]
+            odd_cols  = col_indices[col_indices % 2 == 1]
+
+            corrected[:, x0 + even_cols] = (asic_data[:, even_cols]
+                                             - cm_even_safe[:, np.newaxis])
+            corrected[:, x0 + odd_cols]  = (asic_data[:, odd_cols]
+                                             - cm_odd_safe[:, np.newaxis])
+
+            # Store mean of even+odd as the representative CM value for display
+            with np.errstate(invalid="ignore"):
+                cm_mean = np.where(
+                    np.isfinite(cm_even) & np.isfinite(cm_odd),
+                    (cm_even + cm_odd) * 0.5,
+                    np.where(np.isfinite(cm_even), cm_even, cm_odd),
+                )
+            cm_values[:, i] = cm_mean.astype(np.float32)
+
+        else:
+            # Standard: single median over all columns in ASIC
+            cm_col  = _masked_median_axis1(asic_data, bad_asic)   # (n_Y,)
+            cm_safe = np.where(np.isfinite(cm_col), cm_col, 0.0).astype(np.float32)
+            cm_values[:, i]     = cm_col
+            corrected[:, x0:x1] = asic_data - cm_safe[:, np.newaxis]
 
     return corrected, cm_values, np.array(asic_names)
 
@@ -172,13 +225,14 @@ def cm_correct_frame(
         bad_pixel_mask: np.ndarray | None = None,
         overflow_mask:  np.ndarray | None = None,
         underflow_mask: np.ndarray | None = None,
+        split_even_odd: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """
     Apply CM correction to a single 2-D residual frame (Y, X).
 
-    If asic_slices is provided, computes CM per ASIC.
-    Otherwise falls back to per-row CM (all X columns) matching ROOT
-    HCommonModeMedian with NADCs=1.
+    If asic_slices is provided, computes CM per ASIC (with optional
+    even/odd split matching ROOT HCommonModeMedianEvenOdd).
+    Otherwise falls back to per-row CM (all X columns).
 
     Parameters
     ----------
@@ -187,6 +241,7 @@ def cm_correct_frame(
     bad_pixel_mask  : bool (n_Y, n_X) or None
     overflow_mask   : bool (n_Y, n_X) or None
     underflow_mask  : bool (n_Y, n_X) or None
+    split_even_odd  : separate even/odd column medians (ROOT SplitEvenOdd=1)
 
     Returns
     -------
@@ -200,14 +255,41 @@ def cm_correct_frame(
             bad_pixel_mask=bad_pixel_mask,
             overflow_mask=overflow_mask,
             underflow_mask=underflow_mask,
+            split_even_odd=split_even_odd,
         )
 
-    # Legacy: CM over all X columns per row
+    # Legacy: CM over all X columns per row (no even/odd split)
     bad_full = _make_bad_mask(bad_pixel_mask, overflow_mask, underflow_mask)
-    cm       = _masked_median_axis1(
-        residual.astype(np.float32), bad_full
-    )
-    cm_safe  = np.where(np.isfinite(cm), cm, 0.0).astype(np.float32)
+
+    if split_even_odd:
+        # Even/odd split on full row (no ASIC boundaries)
+        n_Y, n_X = residual.shape
+        corrected = residual.astype(np.float32, copy=True)
+        col_indices = np.arange(n_X)
+        even_cols = col_indices[col_indices % 2 == 0]
+        odd_cols  = col_indices[col_indices % 2 == 1]
+
+        data_f32 = residual.astype(np.float32)
+
+        cm_even = _masked_median_parity(data_f32, bad_full, parity=0)
+        cm_odd  = _masked_median_parity(data_f32, bad_full, parity=1)
+
+        cm_even_safe = np.where(np.isfinite(cm_even), cm_even, 0.0).astype(np.float32)
+        cm_odd_safe  = np.where(np.isfinite(cm_odd),  cm_odd,  0.0).astype(np.float32)
+
+        corrected[:, even_cols] = data_f32[:, even_cols] - cm_even_safe[:, np.newaxis]
+        corrected[:, odd_cols]  = data_f32[:, odd_cols]  - cm_odd_safe[:, np.newaxis]
+
+        with np.errstate(invalid="ignore"):
+            cm_mean = np.where(
+                np.isfinite(cm_even) & np.isfinite(cm_odd),
+                (cm_even + cm_odd) * 0.5,
+                np.where(np.isfinite(cm_even), cm_even, cm_odd),
+            )
+        return corrected, cm_mean.astype(np.float32), None
+
+    cm      = _masked_median_axis1(residual.astype(np.float32), bad_full)
+    cm_safe = np.where(np.isfinite(cm), cm, 0.0).astype(np.float32)
     corrected = residual.astype(np.float32) - cm_safe[:, np.newaxis]
     return corrected, cm.astype(np.float32), None
 
@@ -219,6 +301,7 @@ def apply_common_mode_correction(
         asic_slices:    dict[str, tuple[int, int, int, int]] | None = None,
         bad_pixel_mask: np.ndarray | None = None,
         n_bits:         int = 16,
+        split_even_odd: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, list[str] | None]:
     """
     Subtract per-pixel offset then apply CM correction to a stack of frames.
@@ -235,6 +318,7 @@ def apply_common_mode_correction(
     asic_slices     : optional ASIC geometry
     bad_pixel_mask  : bool (n_Y, n_X) or None
     n_bits          : ADC bit depth (default 16)
+    split_even_odd  : separate even/odd column medians per ASIC
 
     Returns
     -------
@@ -243,13 +327,13 @@ def apply_common_mode_correction(
     asic_names : None or list of ASIC names
     """
     tag = f"[{label}] " if label else ""
-    print(f"  {tag}Applying CM correction …")
+    eo_tag = " [even/odd split]" if split_even_odd else ""
+    print(f"  {tag}Applying CM correction{eo_tag} …")
 
-    overflow_val  = (1 << n_bits) - 1
+    overflow_val = (1 << n_bits) - 1
 
-    # Detect overflow/underflow from integer raw values before offset subtract
     if np.issubdtype(data.dtype, np.integer):
-        overflow_stack  = (data == overflow_val)   # (N, Y, X) bool
+        overflow_stack  = (data == overflow_val)
         underflow_stack = (data == 0)
     else:
         overflow_stack  = None
@@ -262,8 +346,7 @@ def apply_common_mode_correction(
     if asic_slices:
         asic_names = sorted(asic_slices.keys())
         n_asics    = len(asic_names)
-        cm_map     = np.zeros((n_frames, data.shape[1], n_asics),
-                              dtype=np.float32)
+        cm_map     = np.zeros((n_frames, data.shape[1], n_asics), dtype=np.float32)
         corrected  = np.empty_like(residual)
 
         for f in range(n_frames):
@@ -274,6 +357,7 @@ def apply_common_mode_correction(
                 bad_pixel_mask=bad_pixel_mask,
                 overflow_mask=of,
                 underflow_mask=uf,
+                split_even_odd=split_even_odd,
             )
             corrected[f] = corr_f
             cm_map[f]    = cm_f
@@ -292,6 +376,7 @@ def apply_common_mode_correction(
                 bad_pixel_mask=bad_pixel_mask,
                 overflow_mask=of,
                 underflow_mask=uf,
+                split_even_odd=split_even_odd,
             )
             corrected[f] = corr_f
             cm_map[f]    = cm_f

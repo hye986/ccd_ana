@@ -9,7 +9,6 @@ Config file format (YAML)
   general:
     output_dir: output            # output directory for results
     data_dir: .                  # base input directory
-    # Shared settings (used by both offset and event_rec stages):
     data_format: raw             # raw | h5 (file format)
     frame_rows: 1024             # number of rows per frame (Y dimension)
     frame_cols: 512              # number of columns per frame (X dimension)
@@ -27,20 +26,22 @@ Config file format (YAML)
     pedestal_method: both        # median | sigclip | both
     sigma_clip_nsigma: 3.0
     compare_pedestal_methods: true
+    split_even_odd: true         # separate even/odd column CM medians per ASIC
     save_npy: true
     save_h5: true
 
   event_rec:
     source_run_file: source_run.raw  # relative to data_dir
-    calibration_file: offset.h5  # relative to data_dir
+    calibration_file: offset.h5      # relative to data_dir
     seed_sigma: 5.0
     split_sigma: 3.0
+    split_even_odd: true             # separate even/odd column CM medians per ASIC
     noise_scope: auto
     reject_extra: false
     adu_min: 0.0
     adu_max: 10000.0
     n_bins: 1000
-    save_events: events.h5  # relative to output_dir (null to skip saving)
+    save_events: events.h5
     prefer_offset: sigclip
 
 Path resolution:
@@ -49,10 +50,6 @@ Path resolution:
   - Output paths (save_events) are resolved relative to output_dir
   - calibration_file defaults to {output_dir}/offset.h5 if not set
   - save_events defaults to {output_dir}/events.h5 if not set
-
-Sections not present in the YAML are simply skipped at runtime.
-Each CLI script reads only the section(s) it needs, so you can reuse a
-config file across multiple analysis stages.
 """
 
 from __future__ import annotations
@@ -68,25 +65,23 @@ except ImportError:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Defaults  (merged with user YAML, so only overrides are needed)
+# Defaults
 # ──────────────────────────────────────────────────────────────────────────────
 
 _DEFAULTS: dict[str, Any] = {
     "general": {
-        "output_dir":       "output",      # base output directory for results
-        "data_dir":         ".",           # base input directory for data files
-        # Shared settings (used by offset and event_rec stages):
-        "data_format":      "raw",         # raw | h5 (file format)
-        "frame_rows":       None,          # number of rows per frame (auto-detected if None)
-        "frame_cols":      None,          # number of columns per frame (auto-detected if None)
-        "n_workers":        8,             # parallel workers
-        "chunk_size":       64,            # frames per chunk
-        "max_frames":       None,          # null = all
-        "complete_only":    True,          # skip incomplete last frame
-        "save_frame_plots": True,          # generate diagnostic plots
-        # ASIC configuration
-        "ASIC_num":         8,             # number of ASICs horizontally (512 cols / ASIC_num = cols per ASIC)
-        "ASIC_mask":        [],             # list of masked ASIC indices to exclude (e.g., [0, 2] to skip ASICs 0 and 2)
+        "output_dir":       "output",
+        "data_dir":         ".",
+        "data_format":      "raw",
+        "frame_rows":       None,
+        "frame_cols":       None,
+        "n_workers":        8,
+        "chunk_size":       64,
+        "max_frames":       None,
+        "complete_only":    True,
+        "save_frame_plots": True,
+        "ASIC_num":         8,
+        "ASIC_mask":        [],
         "metadata":         {},
     },
     "offset": {
@@ -98,10 +93,15 @@ _DEFAULTS: dict[str, Any] = {
         "max_frames":               None,
         "save_npy":                 True,
         "save_h5":                  True,
+        # ROOT Analysis.OffNoiMapHLL.SplitEvenOdd 1
+        # Compute separate CM medians for even- and odd-indexed columns
+        # within each ASIC segment.  Corrects alternating-channel correlated
+        # noise seen in pnCCDs.  Matches ROOT HCommonModeMedianEvenOdd.
+        "split_even_odd":           True,
     },
     "event_rec": {
         "source_run_file":    None,
-        "calibration_file":   None,   # defaults to {output_dir}/offset.h5
+        "calibration_file":   None,
         "skip_frames":        0,
         "max_frames":         None,
         "seed_sigma":         5.0,
@@ -111,24 +111,24 @@ _DEFAULTS: dict[str, Any] = {
         "adu_min":            0.0,
         "adu_max":            10000.0,
         "n_bins":             1000,
-        "save_events":        None,   # defaults to {output_dir}/events.h5
+        "save_events":        None,
         "prefer_offset":      "sigclip",
-        "bad_pixel_mask":     {           # set enabled: false to disable
+        "split_even_odd":     True,
+        "bad_pixel_mask": {
             "enabled":           True,
-            "hot_rms_multiple":  5.0,     # noise > this × median(noise) → HOT
-            "cold_rms_fraction": 0.1,     # noise < this × median(noise) → COLD/stuck
-            "max_clip_fraction": 0.5,     # if >50% of dark frames were clipped at the
-                                          # pixel → UNSTABLE (needs n_dark_frames)
-            "n_dark_frames":     0,       # 0 → skip clip-fraction test
+            "hot_rms_multiple":  5.0,
+            "cold_rms_fraction": 0.1,
+            "max_clip_fraction": 0.5,
+            "n_dark_frames":     0,
         },
     },
     "energy_cal": {
         "events_file":       None,
         "output_file":       None,
         "target_ev":         5895.0,
-        "kalpha_adu":        None,    # REQUIRED: expected Kα peak in ADU
-        "kalpha_adu_window": 0.20,    # Phase 1 fit window ± fraction of kalpha_adu
-        "fit_window_frac":   0.15,    # Phases 3+4 fit window ± fraction of target_ev
+        "kalpha_adu":        None,
+        "kalpha_adu_window": 0.20,
+        "fit_window_frac":   0.15,
         "rough_min_events":  100,
         "cti_row_bin_size":  64,
         "cti_min_events":    50,
@@ -154,6 +154,7 @@ class Config:
         cfg = Config.from_yaml("analysis.yaml")
         print(cfg.general["output_dir"])
         print(cfg.offset["pedestal_method"])
+        print(cfg.offset["split_even_odd"])    # True by default
 
     Sections not in the YAML are populated with defaults.
     Unknown top-level sections are preserved as-is (for future extensions).
@@ -163,8 +164,18 @@ class Config:
         self._raw = raw
         # Merge each known section with defaults
         for section, defaults in _DEFAULTS.items():
-            user   = raw.get(section, {}) or {}
-            merged = {**defaults, **user}
+            user = raw.get(section, {}) or {}
+            # Deep-merge nested dicts (e.g. bad_pixel_mask sub-dict)
+            merged: dict = {}
+            for k, v in defaults.items():
+                if isinstance(v, dict) and isinstance(user.get(k), dict):
+                    merged[k] = {**v, **user[k]}
+                else:
+                    merged[k] = user.get(k, v)
+            # Carry over any extra user keys not in defaults
+            for k, v in user.items():
+                if k not in merged:
+                    merged[k] = v
             setattr(self, section, merged)
         # Preserve any extra sections verbatim
         for section in raw:
@@ -182,13 +193,7 @@ class Config:
         return Path(self.general["data_dir"])
 
     def resolve_input_path(self, path: str | Path | None) -> Path | None:
-        """
-        Resolve an input file path relative to data_dir.
-        
-        If path is None, returns None.
-        If path is absolute, returns as-is.
-        If path is relative, joins with data_dir.
-        """
+        """Resolve an input file path relative to data_dir."""
         if path is None:
             return None
         p = Path(path)
@@ -197,13 +202,7 @@ class Config:
         return self.data_dir / p
 
     def resolve_output_path(self, path: str | Path | None) -> Path | None:
-        """
-        Resolve an output file path relative to output_dir.
-        
-        If path is None, returns None.
-        If path is absolute, returns as-is.
-        If path is relative, joins with output_dir.
-        """
+        """Resolve an output file path relative to output_dir."""
         if path is None:
             return None
         p = Path(path)
@@ -220,11 +219,7 @@ class Config:
         return self.resolve_output_path("events.h5")
 
     def asics_for(self, section: str) -> list[str] | None:
-        """Return resolved ASIC list for *section*.
-
-        Reads from general['asics'] for single-hybrid mode (ASICs are not
-        stage-specific).
-        """
+        """Return resolved ASIC list for *section*."""
         from .io.geometry import resolve_asics
         raw = self.general.get("asics", None)
         if isinstance(raw, str):
@@ -284,7 +279,7 @@ class Config:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Template generator
+# Template
 # ──────────────────────────────────────────────────────────────────────────────
 
 _TEMPLATE = """\
@@ -294,8 +289,7 @@ _TEMPLATE = """\
 
 general:
   output_dir: output                # output directory for results
-  data_dir: .                       # base input directory (paths are relative to this)
-  # Shared settings (used by offset and event_rec stages):
+  data_dir: .                       # base input directory (paths relative to this)
   data_format: raw                  # raw | h5 (file format)
   frame_rows: 1024                  # number of rows per frame (Y dimension)
   frame_cols: 512                   # number of columns per frame (X dimension)
@@ -303,10 +297,9 @@ general:
   chunk_size: 64                    # frames per chunk
   max_frames: null                  # null = all frames
   complete_only: true               # skip incomplete last frame
-  save_frame_plots: true            # generate diagnostic plots (hitmap, spectrum, etc.)
-  # ASIC configuration
-  ASIC_num: 8                       # number of ASICs horizontally (frame_cols / ASIC_num = cols per ASIC)
-  ASIC_mask: []                     # list of masked ASIC indices to exclude (e.g., [0, 2] to skip ASICs 0 and 2)
+  save_frame_plots: true            # generate diagnostic plots
+  ASIC_num: 8                       # number of ASICs (frame_cols / ASIC_num = cols per ASIC)
+  ASIC_mask: []                     # masked ASIC indices e.g. [0, 2]
   metadata:
     operator: ""
     sample: ""
@@ -316,52 +309,55 @@ offset:
   dark_run_file: dark_run.raw       # relative to data_dir
   pedestal_method: both             # median | sigclip | both
   sigma_clip_nsigma: 3.0
-  compare_pedestal_methods: true    # compare median vs sigma-clip offsets
-  skip_frames: 0                    # skip this many frames at start of first file
-                                    # (warm-up / shutter transient / bad first frames)
+  compare_pedestal_methods: true
+  skip_frames: 0                    # skip N frames at start (warm-up / shutter transient)
   max_frames: null                  # overrides general.max_frames for this stage
-                                    # null = fall back to general.max_frames
-  save_npy: true                    # save as .npy files
-  save_h5: true                     # save as .h5 file
+  save_npy: true
+  save_h5: true
+  split_even_odd: true              # separate CM medians for even/odd columns per ASIC
+                                    # matches ROOT Analysis.OffNoiMapHLL.SplitEvenOdd 1
+                                    # corrects alternating-channel correlated noise in pnCCDs
+                                    # set false for standard single-median CM correction
 
 event_rec:
   source_run_file: source_run.raw   # relative to data_dir
-  calibration_file: offset.h5  # relative to data_dir (or output_dir if not found)
-  skip_frames: 0                    # same as above, applied to source run files
-  max_frames: null                  # overrides general.max_frames for this stage
-  seed_sigma: 5.0                   # threshold for finding candidate centres (3-8 × noise)
-  split_sigma: 3.0                  # threshold for classifying neighbours (1-3 × noise)
-  noise_scope: auto                 # auto | global | asic
-  reject_extra: false               # if true, discard grade-13 "other" events
+  calibration_file: offset.h5       # relative to data_dir (or output_dir if not found)
+  skip_frames: 0
+  max_frames: null
+  seed_sigma: 5.0                   # primary threshold — ROOT Analysis.Filter.ThresPrm 5 noise
+  split_sigma: 3.0                  # secondary threshold — ROOT Analysis.Filter.ThresSec 3 noise
+  split_even_odd: true              # separate CM medians for even/odd columns per ASIC
+                                    # matches ROOT Analysis.Filter.SplitEvenOdd 1
+                                    # MUST match the value used in the offset stage
+  noise_scope: auto
+  reject_extra: false               # discard grade-13 "other" events from output
   adu_min: 0.0
   adu_max: 10000.0
   n_bins: 1000
-  save_events: events.h5            # relative to output_dir (null to skip saving)
+  save_events: events.h5            # relative to output_dir (null to skip)
   prefer_offset: sigclip            # sigclip | median
-  bad_pixel_mask:                   # exclude hot / cold / unstable pixels from event recognition
+  bad_pixel_mask:
     enabled: true
-    hot_rms_multiple: 5.0           # noise > this × median(active noise) → HOT
-    cold_rms_fraction: 0.1          # noise < this × median(active noise) → COLD / stuck
-    max_clip_fraction: 0.5          # frac of dark frames clipped per pixel above which it's UNSTABLE
-    n_dark_frames: 0                # 0 disables the clip-fraction test (no info in the cal file)
+    hot_rms_multiple: 5.0           # noise > N × median(active noise) → HOT
+    cold_rms_fraction: 0.1          # noise < N × median(active noise) → COLD/stuck
+    max_clip_fraction: 0.5          # clip rate above this → UNSTABLE
+    n_dark_frames: 0                # 0 disables clip-fraction test
 
 energy_cal:
-  events_file: null             # null = use {output_dir}/events.h5
-  output_file: null             # null = use {output_dir}/energy_cal.h5
-  target_ev: 5895.0             # Mn Kα reference energy [eV]
-  kalpha_adu: 15000             # REQUIRED: Kα peak position in ADU
-                                # read this from your event_rec spectrum plot
-                                # (the peak of single-pixel events in adu_sum)
-  kalpha_adu_window: 0.20       # Phase 1 fit window ± this fraction of kalpha_adu
-                                # e.g. 0.20 → fit between 12000 and 18000 ADU
-  fit_window_frac: 0.15         # Phases 3+4 fit window ± fraction of target_ev [eV]
-  rough_min_events: 100         # Phase 1: min single events per parity pool
-  cti_row_bin_size: 64          # Phase 3: rows per CTI bin
-  cti_min_events: 50            # Phase 3: min events per row bin
-  cti_grade_filter: null        # null = all grades; or e.g. [0,1,2,3,4]
-  col_min_events: 30            # Phase 4: min events per column
-  col_with_bg: false            # Phase 4: add linear background to Gaussian fit
-  col_grade_filter: [0]         # Phase 4: grades used for per-column fit
+  events_file: null                 # null = {output_dir}/events.h5
+  output_file: null                 # null = {output_dir}/energy_cal.h5
+  target_ev: 5895.0                 # Mn Kα reference energy [eV]
+  kalpha_adu: 15000                 # REQUIRED: Kα peak position in ADU
+                                    # read from event_rec spectrum (single-pixel peak)
+  kalpha_adu_window: 0.20           # Phase 1 fit window ± fraction of kalpha_adu
+  fit_window_frac: 0.15             # Phases 3+4 fit window ± fraction of target_ev [eV]
+  rough_min_events: 100
+  cti_row_bin_size: 64
+  cti_min_events: 50
+  cti_grade_filter: null            # null = all grades; or e.g. [0,1,2,3,4]
+  col_min_events: 30
+  col_with_bg: false
+  col_grade_filter: [0]
   save_plots: true
 """
 
