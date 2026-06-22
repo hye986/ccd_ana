@@ -17,7 +17,8 @@ from .event_plots import (plot_hitmap,
 from .gain_plots    import (plot_gain_map,
                              plot_gain_histogram,
                              plot_column_peaks,
-                             plot_grade_spectrum)
+                             plot_grade_spectrum,
+                             plot_gain_vs_row)
 from .cti_plots     import (plot_cte_map,
                              plot_cti_summary,
                              plot_signal_vs_row)

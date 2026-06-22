@@ -159,7 +159,8 @@ def _make_worker(cal, asics, noise_map,
                  bad_pixel_mask=None,
                  sample_buf=None, sample_max=50,
                  asic_slices=None,
-                 split_even_odd=False):
+                 split_even_odd=False,
+                 max_cluster_size=0):
     """
     Return a closure for process_frames_mt.
     Returns a CSR cluster_data dict per chunk.
@@ -190,7 +191,8 @@ def _make_worker(cal, asics, noise_map,
                              search_mask=search_mask,
                              seed_sigma=seed_sigma,
                              split_sigma=split_sigma,
-                             bad_pixel_mask=bad_pixel_mask)
+                             bad_pixel_mask=bad_pixel_mask,
+                             max_cluster_size=max_cluster_size)
 
             n_evt = len(cd["flag"])
             if n_evt == 0:
@@ -331,13 +333,14 @@ def run(cfg: Config) -> dict:
     else:
         calibration_path = cfg.calibration_path()
 
-    asics        = cfg.asics_for("event_rec")
-    seed_sigma   = float(ec.get("seed_sigma",  ec.get("threshold_sigma", 5.0)))
-    split_sigma  = float(ec.get("split_sigma", 3.0))
-    prefer       = ec.get("prefer_offset", "sigclip")
-    noise_scope  = ec.get("noise_scope", "auto")
-    stage_skip   = int(ec.get("skip_frames", 0))
-    stage_max    = ec.get("max_frames", None)
+    asics              = cfg.asics_for("event_rec")
+    seed_sigma         = float(ec.get("seed_sigma",  ec.get("threshold_sigma", 5.0)))
+    split_sigma        = float(ec.get("split_sigma", 3.0))
+    max_cluster_size   = int(ec.get("max_cluster_size", 0))
+    prefer             = ec.get("prefer_offset", "sigclip")
+    noise_scope        = ec.get("noise_scope", "auto")
+    stage_skip         = int(ec.get("skip_frames", 0))
+    stage_max          = ec.get("max_frames", None)
     if stage_max is not None:
         stage_max = int(stage_max)
     effective_max = stage_max if stage_max is not None else gen["max_frames"]
@@ -404,7 +407,8 @@ def run(cfg: Config) -> dict:
                           sample_buf      = sample_buf,
                           sample_max      = 200,
                           asic_slices     = asic_slices,
-                          split_even_odd  = split_even_odd)
+                          split_even_odd  = split_even_odd,
+                          max_cluster_size = max_cluster_size)
 
     # ── Process all source files ──────────────────────────────────────────────
     all_results: list[dict] = []          # list of per-chunk CSR dicts

@@ -56,46 +56,161 @@ def plot_gain_map(
 
 
 def plot_gain_histogram(
-        gain_map:      np.ndarray,
-        bad_gain_map:  np.ndarray,
+        gain_map:       np.ndarray,
+        bad_gain_map:   np.ndarray,
         split_even_odd: bool,
-        out_dir:       Path,
-        n_bins:        int = 200,
+        out_dir:        Path,
+        n_bins:         int = 200,
 ) -> None:
-    """Histogram of gain values, optionally split by column parity."""
-    out_dir  = Path(out_dir)
-    good_all = bad_gain_map[0, :] == 0   # row=0 quality for each column
+    """
+    Three-panel gain histogram:
+      Panel 1: Row-0 gain per column (intrinsic column gain, split by parity)
+      Panel 2: Gain vs row for sample columns (shows CTE effect)
+      Panel 3: All-pixel gain distribution (full 2D)
+    """
+    out_dir        = Path(out_dir)
+    n_rows, n_cols = gain_map.shape
+    good_cols      = bad_gain_map[0, :] == 0
+    rows           = np.arange(n_rows)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
+    # Panel 1: row-0 gain split by parity
+    ax = axes[0]
     if split_even_odd:
         for parity, label, color in [(0, "odd col (p=0)",  "steelblue"),
                                       (1, "even col (p=1)", "tomato")]:
-            cols   = [c for c in range(gain_map.shape[1])
-                      if (c + 1) % 2 == parity and good_all[c]]
-            if not cols:
+            cols = np.array([c for c in range(n_cols)
+                             if (c + 1) % 2 == parity and good_cols[c]])
+            if not len(cols):
                 continue
-            vals   = gain_map[0, cols]
-            vals   = vals[vals > 0]
+            vals = gain_map[0, cols]
+            vals = vals[vals > 0]
+            if not len(vals):
+                continue
             lo, hi = np.percentile(vals, [0.5, 99.5])
             ax.hist(vals, bins=n_bins, range=(lo, hi),
                     histtype="step", label=label, color=color, linewidth=1.5)
     else:
-        vals = gain_map[0, good_all]
+        vals = gain_map[0, good_cols]
         vals = vals[vals > 0]
         if len(vals):
             lo, hi = np.percentile(vals, [0.5, 99.5])
             ax.hist(vals, bins=n_bins, range=(lo, hi),
                     histtype="step", color="steelblue", linewidth=1.5)
-
     ax.set_xlabel("Gain [eV/ADU]")
     ax.set_ylabel("Columns")
-    ax.set_title("Gain distribution (row 0, good columns)")
+    ax.set_title("Base gain — row 0\n(intrinsic column gain, CTE=1)")
     ax.legend()
+
+    # Panel 2: gain vs row for sample columns
+    ax = axes[1]
+    good_col_idx = np.where(good_cols)[0]
+    step         = max(1, len(good_col_idx) // 10)
+    sample_cols  = good_col_idx[::step][:10]
+    for col in sample_cols:
+        g = np.where(gain_map[:, col] > 0, gain_map[:, col], np.nan)
+        ax.plot(rows, g, lw=0.8, alpha=0.7)
+    ax.set_xlabel("Row (Y)")
+    ax.set_ylabel("Gain [eV/ADU]")
+    ax.set_title("Gain vs row — sample columns\n"
+                 "(increases with row due to CTE correction)")
+    ax.grid(alpha=0.3)
+
+    # Panel 3: all-pixel gain
+    ax = axes[2]
+    good_pixels = bad_gain_map == 0
+    all_gains   = gain_map[good_pixels]
+    all_gains   = all_gains[all_gains > 0]
+    if len(all_gains):
+        lo, hi = np.percentile(all_gains, [0.5, 99.5])
+        ax.hist(all_gains, bins=n_bins, range=(lo, hi),
+                histtype="stepfilled", color="steelblue", alpha=0.7)
+    ax.set_xlabel("Gain [eV/ADU]")
+    ax.set_ylabel("Pixels")
+    ax.set_title("All-pixel gain distribution\n"
+                 "(includes CTE variation across rows)")
+
     fig.tight_layout()
     fig.savefig(out_dir / "gain_histogram.png", dpi=150)
     plt.close(fig)
-    print(f"  → {out_dir/'gain_histogram.png'}")
+    print(f"  → {out_dir / 'gain_histogram.png'}")
+
+
+def plot_gain_vs_row(
+        gain_map:     np.ndarray,
+        cte_map:      np.ndarray,
+        bad_gain_map: np.ndarray,
+        out_dir:      Path,
+        n_sample:     int = 20,
+) -> None:
+    """
+    Gain and CTE as a function of row — key diagnostic for CTI calibration.
+
+    Panel 1: Normalised gain vs row (gain / gain[row=0])
+             Should increase monotonically — slope = CTI per transfer
+    Panel 2: Mean CTE vs row
+             Should decrease monotonically from 1.0 at row=0
+    """
+    out_dir        = Path(out_dir)
+    n_rows, n_cols = gain_map.shape
+    rows           = np.arange(n_rows)
+
+    good_cols    = bad_gain_map[0, :] == 0
+    good_col_idx = np.where(good_cols)[0]
+    step         = max(1, len(good_col_idx) // n_sample)
+    sample_cols  = good_col_idx[::step][:n_sample]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Panel 1: normalised gain vs row
+    ax = axes[0]
+    for col in sample_cols:
+        g0 = gain_map[0, col]
+        if g0 <= 0:
+            continue
+        g_norm = np.where(gain_map[:, col] > 0,
+                          gain_map[:, col] / g0, np.nan)
+        ax.plot(rows, g_norm, lw=0.6, alpha=0.5, color="steelblue")
+
+    # Mean normalised gain across good columns
+    if len(good_col_idx) > 0:
+        g0_arr = gain_map[0, good_col_idx]
+        safe   = g0_arr > 0
+        if safe.any():
+            g_matrix = gain_map[:, good_col_idx[safe]]
+            g0_vec   = g0_arr[safe][np.newaxis, :]
+            g_norm_m = np.where(g_matrix > 0, g_matrix / g0_vec, np.nan)
+            mean_norm = np.nanmean(g_norm_m, axis=1)
+            ax.plot(rows, mean_norm, lw=2.0, color="tomato",
+                    label="mean over good columns")
+
+    ax.set_xlabel("Row (Y)")
+    ax.set_ylabel("Gain / Gain[row=0]")
+    ax.set_title("Normalised gain vs row\n"
+                 "(slope = CTI, should increase linearly)")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    # Panel 2: mean CTE vs row
+    ax = axes[1]
+    if len(good_col_idx) > 0:
+        cte_matrix = np.where(cte_map[:, good_col_idx] > 0,
+                               cte_map[:, good_col_idx], np.nan)
+        cte_mean   = np.nanmean(cte_matrix, axis=1)
+        ax.plot(rows, cte_mean, color="steelblue", lw=1.5,
+                label="mean CTE (good columns)")
+    ax.set_xlabel("Row (Y)")
+    ax.set_ylabel("Cumulative CTE")
+    ax.set_title("Mean CTE vs row\n"
+                 "(decreases from 1.0 — more loss at higher rows)")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(out_dir / "gain_vs_row.png", dpi=150)
+    plt.close(fig)
+    print(f"  → {out_dir / 'gain_vs_row.png'}")
 
 
 def plot_column_peaks(

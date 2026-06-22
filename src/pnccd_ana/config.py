@@ -108,6 +108,7 @@ _DEFAULTS: dict[str, Any] = {
         "split_sigma":        3.0,
         "noise_scope":        "auto",
         "reject_extra":       False,
+        "max_cluster_size":   0,
         "adu_min":            0.0,
         "adu_max":            10000.0,
         "n_bins":             1000,
@@ -326,6 +327,10 @@ event_rec:
   max_frames: null
   seed_sigma: 5.0                   # primary threshold — ROOT Analysis.Filter.ThresPrm 5 noise
   split_sigma: 3.0                  # secondary threshold — ROOT Analysis.Filter.ThresSec 3 noise
+  max_cluster_size: 9               # reject clusters larger than this many pixels
+                                    # singles=1 .. quads=4, generous limit=9
+                                    # larger clusters are cosmic rays / particle tracks
+                                    # set 0 to disable
   split_even_odd: true              # separate CM medians for even/odd columns per ASIC
                                     # matches ROOT Analysis.Filter.SplitEvenOdd 1
                                     # MUST match the value used in the offset stage

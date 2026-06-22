@@ -142,9 +142,18 @@ def find_events(
         bad_pixel_mask:    np.ndarray | None = None,
         clamp_sec_to_prim: bool  = True,
         flag_border:       bool  = True,
+        max_cluster_size:  int   = 0,
 ) -> dict:
     """
     Find photon events in a single CM-corrected frame.
+
+    Parameters
+    ----------
+    max_cluster_size : int, default 0
+        Reject clusters larger than this many pixels.
+        0 (default) disables the filter.
+        Fe55 Mn Kα produces at most 4-pixel clusters; set 9 as generous limit
+        to reject cosmic rays and particle tracks.
 
     Returns full per-pixel cluster data in CSR format.
     No grade assignment — deferred to calibrate.py.
@@ -216,19 +225,41 @@ def find_events(
     # Build CSR offsets from cluster label runs
     # unique_labels are in sorted order; counts give cluster sizes
     unique_labels, counts = np.unique(pix_label, return_counts=True)
-    n_events  = len(unique_labels)
-    offsets   = np.zeros(n_events + 1, dtype=np.int64)
+
+    # ── Cluster size filter ───────────────────────────────────────────────────
+    # Operates on sorted_flat so pixel coordinate arrays are rebuilt cleanly.
+    if max_cluster_size > 0:
+        keep       = counts <= max_cluster_size
+        if not keep.all():
+            keep_labels = unique_labels[keep]
+            pix_keep    = np.isin(pix_label, keep_labels)
+            # Re-extract and re-sort from accepted flat indices
+            flat_idx    = flat_idx[pix_keep]
+            pix_label   = pix_label[pix_keep]
+            sort_idx    = np.argsort(pix_label, kind="stable")
+            pix_label   = pix_label[sort_idx]
+            unique_labels = keep_labels
+            counts      = counts[keep]
+
+    n_events = len(unique_labels)
+    if n_events == 0:
+        return _empty_result()
+
+    # Rebuild pixel coordinate arrays from sorted flat indices
+    pix_Y   = (flat_idx // W).astype(np.int16)
+    pix_X   = (flat_idx  % W).astype(np.int16)
+    pix_adu = frame.ravel()[flat_idx].astype(np.float32)
+
+    offsets = np.zeros(n_events + 1, dtype=np.int64)
     np.cumsum(counts, out=offsets[1:])
 
     # ── Per-event flag ────────────────────────────────────────────────────────
     flags = np.zeros(n_events, dtype=np.uint8)
     if flag_border:
         # For each cluster, check if any pixel is on the border
-        # border_flat[pixel] = True if border pixel
-        border_flat = border_mask.ravel()[flat_idx][sort_idx]
-        # reduceat OR: use max (True=1 > False=0)
+        border_flat = border_mask.ravel()[flat_idx].view(np.uint8)
         has_border  = np.maximum.reduceat(
-            border_flat.view(np.uint8), offsets[:-1].astype(np.intp)
+            border_flat, offsets[:-1].astype(np.intp)
         ).astype(bool)
         flags[has_border] |= FLAG_BORDER
 

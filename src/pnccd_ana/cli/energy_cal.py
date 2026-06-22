@@ -28,7 +28,7 @@ from ..physics.calibrate import (filter_events_for_iteration,
                                   assign_grades,
                                   compute_final_energies)
 from ..plotting.gain_plots import (plot_gain_map, plot_gain_histogram,
-                                    plot_column_peaks)
+                                    plot_column_peaks, plot_gain_vs_row)
 from ..plotting.cti_plots  import (plot_cte_map, plot_signal_vs_row,
                                     plot_cti_summary)
 
@@ -284,6 +284,10 @@ def run(cfg: Config) -> dict:
         plot_gain_map(gain_map, cte_result.bad_gain_map, out_dir)
         plot_gain_histogram(gain_map, cte_result.bad_gain_map,
                             split_even_odd, out_dir)
+        plot_gain_vs_row(gain_map,
+                         cte_result.cte_map,
+                         cte_result.bad_gain_map,
+                         out_dir)
         plot_column_peaks(col_peaks, n_cols, out_dir)
         plot_cte_map(cte_result.cte_map, out_dir)
         plot_cti_summary(cte_result.cte_map,
