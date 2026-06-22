@@ -18,7 +18,7 @@ import numpy as np
 
 from ..config import Config
 from ..physics import (find_events,
-                       N_GRADES, EVENT_DTYPE,
+                       EVENT_DTYPE,
                        build_bad_pixel_mask,
                        ASIC_SLICES, ASIC_WIDTH,
                        configure_asics, get_active_mask,
@@ -26,11 +26,8 @@ from ..physics import (find_events,
 from ..io import (load_calibration_h5, load_calibration_npy,
                   save_events_h5,
                   save_event_rec_results_h5)
-from ..io.hdf5 import (_compute_raw_spectrum_data,
-                        _compute_grade_distribution)
-from ..plotting import (plot_hitmap, plot_spectrum,
-                        plot_grade_distribution,
-                        plot_raw_spectrum)
+from ..io.hdf5 import _compute_raw_spectrum_data
+from ..plotting import (plot_hitmap, plot_spectrum, plot_raw_spectrum)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -180,7 +177,6 @@ def _make_worker(cal: dict,
                  noise_map: np.ndarray,
                  seed_sigma: float,
                  split_sigma: float,
-                 reject_extra: bool,
                  search_mask: np.ndarray | None,
                  bad_pixel_mask: np.ndarray | None = None,
                  sample_buf: list | None = None,
@@ -188,12 +184,10 @@ def _make_worker(cal: dict,
                  asic_slices: dict | None = None,
                  split_even_odd: bool = False):
     """
-    Return a closure suitable for process_frames_mt for single-hybrid mode.
+    Return a closure suitable for process_frames_mt.
 
-    split_even_odd is forwarded to _correct_frame so that CM uses
-    independent even/odd column medians per ASIC (ROOT SplitEvenOdd=1).
-    bad_pixel_mask is forwarded to _correct_frame so that bad pixels
-    are excluded from the CM median (matching ROOT HCommonModeMedian).
+    No grade assignment — raw cluster data only, matching ROOT
+    HStepFilterEvents4 output.
     """
     import threading
     _lock = threading.Lock()
@@ -206,7 +200,6 @@ def _make_worker(cal: dict,
                                        asic_slices=asic_slices,
                                        bad_pixel_mask=bad_pixel_mask,
                                        split_even_odd=split_even_odd)
-
             if sample_buf is not None:
                 with _lock:
                     if len(sample_buf) < sample_max:
@@ -216,7 +209,6 @@ def _make_worker(cal: dict,
                                search_mask=search_mask,
                                seed_sigma=seed_sigma,
                                split_sigma=split_sigma,
-                               reject_extra=reject_extra,
                                bad_pixel_mask=bad_pixel_mask)
             if len(evts):
                 chunk_events.append(evts)
@@ -224,7 +216,6 @@ def _make_worker(cal: dict,
             return np.concatenate(chunk_events)
         return np.empty(0, dtype=EVENT_DTYPE)
     return _worker
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Multi-file path resolution
@@ -373,7 +364,7 @@ def run(cfg: Config) -> dict:
     print(f"  Even/odd CM split: {'enabled' if split_even_odd else 'disabled'}")
 
     worker = _make_worker(cal, asics, noise_map,
-                          seed_sigma, split_sigma, reject_extra,
+                          seed_sigma, split_sigma,
                           search_mask,
                           bad_pixel_mask=bad_pixel_mask,
                           sample_buf=sample_buf, sample_max=200,
@@ -425,65 +416,50 @@ def run(cfg: Config) -> dict:
     events    = np.concatenate(non_empty) if non_empty else np.empty(0, dtype=EVENT_DTYPE)
     print(f"\nTotal events: {len(events):,}")
 
-    # ── Diagnostic summary ────────────────────────────────────────────────────
+    # ── Diagnostic summary ─────────────────────────────────────────────────
     if len(events):
-        from ..physics.pattern_recognition import GRADE_OTHER as _GRADE_OTHER
-        grade_counts = {int(g): int(n)
-                        for g, n in zip(*np.unique(events["grade"], return_counts=True))}
-        print(f"  Grade distribution: {grade_counts}")
+        # Cluster-size distribution (replaces grade distribution)
+        npix_vals, npix_counts = np.unique(events["n_pixels"],
+                                           return_counts=True)
+        size_dist = {int(n): int(c)
+                     for n, c in zip(npix_vals, npix_counts)}
+        print(f"  Cluster-size distribution: {size_dist}")
         print(f"  adu_sum  : min={events['adu_sum'].min():.0f}  "
               f"max={events['adu_sum'].max():.0f}  "
               f"median={np.median(events['adu_sum']):.0f}  ADU")
         print(f"  adu_seed : min={events['adu_seed'].min():.0f}  "
               f"max={events['adu_seed'].max():.0f}  "
               f"median={np.median(events['adu_seed']):.0f}  ADU")
-        # Check whether adu_sum and adu_seed are suspiciously identical.
-        # GRADE_OTHER events are deliberately centre-only, so diagnose that
-        # separately from a real failure to sum recognised split patterns.
-        n_identical = int((np.abs(events["adu_sum"] - events["adu_seed"]) < 0.1).sum())
-        frac_identical = n_identical / len(events) * 100
-        n_other = grade_counts.get(_GRADE_OTHER, 0)
-        frac_other = n_other / len(events) * 100
-        split_mask = (events["grade"] > 0) & (events["grade"] < _GRADE_OTHER)
-        n_split = int(split_mask.sum())
-        n_split_summed = int((np.abs(events["adu_sum"][split_mask] -
-                                     events["adu_seed"][split_mask]) >= 0.1).sum())
-        if frac_other > 50:
-            print(f"  ⚠  WARNING: {frac_other:.1f}% of events are grade {_GRADE_OTHER} ('other')")
-            print("     'other' events are unrecognized 5x5 patterns and store centre ADU only.")
-            print("     Use reject_extra: true for spectra, or raise split_sigma if random")
-            print("     neighbour noise is creating extra above-split pixels.")
-        elif n_split and n_split_summed < 0.8 * n_split:
-            print(f"  ⚠  WARNING: only {n_split_summed}/{n_split} recognized split events "
-                  "have adu_sum > adu_seed")
-            print("     This would indicate a summing bug for grades 1 to (GRADE_OTHER-1).")
-        elif frac_identical > 80 and grade_counts.get(0, 0) < len(events) * 0.8:
-            print(f"  ⚠  WARNING: {frac_identical:.1f}% of events have adu_sum ≈ adu_seed")
-            print("     Most accepted events are centre-only; inspect grade distribution.")
-        elif n_split == 0:
-            print(f"  ✓  No recognized split events in grades 1–{_GRADE_OTHER - 1}")
-        else:
-            print(f"  ✓  {n_split_summed}/{n_split} recognized split events have "
-                  "adu_sum > adu_seed")
 
-        # Check if bin range covers the peaks
+        # Sanity check: split events should have adu_sum > adu_seed
+        split_mask = events["n_pixels"] > 1
+        n_split    = int(split_mask.sum())
+        if n_split:
+            n_summed = int((events["adu_sum"][split_mask] >
+                            events["adu_seed"][split_mask] + 0.1).sum())
+            print(f"  ✓  {n_summed}/{n_split} multi-pixel events "
+                  f"have adu_sum > adu_seed")
+
         in_range = int(((events["adu_sum"] >= ec["adu_min"]) &
                         (events["adu_sum"] <= ec["adu_max"])).sum())
         if in_range < len(events) * 0.5:
             print(f"  ⚠  Only {in_range}/{len(events)} events within "
                   f"adu_min={ec['adu_min']:.0f}..adu_max={ec['adu_max']:.0f}")
-            print(f"     Plots will auto-range but UPDATE adu_min/adu_max in config.")
+            print(f"     UPDATE adu_min/adu_max in config.")
 
-    # ── Spectrum histograms ───────────────────────────────────────────────────
+    # ── Spectra by cluster size ───────────────────────────────────────────
     bin_edges = np.linspace(ec["adu_min"], ec["adu_max"], ec["n_bins"] + 1)
-    from ..physics.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
-    spectra: dict[int, np.ndarray] = {}
-    all_grade_ids = [gid for gid, _, _ in _GRADE_DEFS] + [GRADE_OTHER]
-    for g in all_grade_ids:
-        m = events["grade"] == g
-        spectra[g], _ = (np.histogram(events["adu_sum"][m], bins=bin_edges)
+    spectra: dict[int, np.ndarray] = {}   # key = n_pixels
+    for n in range(1, 6):   # 1=single .. 5=large
+        m = events["n_pixels"] == n
+        spectra[n], _ = (np.histogram(events["adu_sum"][m], bins=bin_edges)
                          if m.any() else
                          (np.zeros(ec["n_bins"], dtype=np.int64), bin_edges))
+    # n_pixels >= 5 grouped as "large"
+    m_large = events["n_pixels"] >= 5
+    spectra[5], _ = (np.histogram(events["adu_sum"][m_large], bins=bin_edges)
+                     if m_large.any() else
+                     (np.zeros(ec["n_bins"], dtype=np.int64), bin_edges))
 
     # ── 2-D maps ──────────────────────────────────────────────────────────────
     hit_count = np.zeros((H, W), dtype=np.int32)
@@ -532,10 +508,8 @@ def run(cfg: Config) -> dict:
     if gen["save_frame_plots"]:
         plot_hitmap(hit_count, mean_adu, out_dir, asics)
         plot_spectrum(spectra, bin_edges, out_dir, events=events)
-        if len(events):
-            plot_grade_distribution(events, out_dir)
+        # plot_grade_distribution removed — no grades assigned here
 
-        # Raw pixel-level spectrum (needs sample frames)
         if sample_arr is not None:
             plot_raw_spectrum(
                 corrected_frames=sample_arr,

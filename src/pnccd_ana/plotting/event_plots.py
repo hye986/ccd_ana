@@ -14,9 +14,8 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
 from ..io.geometry import ASIC_COLORS, ADC_MAX
-from ..physics.pattern_recognition import N_GRADES, GRADE_NAMES, _GRADE_DEFS, GRADE_OTHER
-from .common import _cb, _stats_box, _get_grade_palette, _get_group_label, _adjust_bin_range
-
+from ..physics.event_filter import EVENT_DTYPE
+from .common import _cb, _stats_box, _adjust_bin_range
 
 def plot_cm_map(
         scope_name:  str,
@@ -115,136 +114,129 @@ def plot_hitmap(hit_count: np.ndarray, mean_adu: np.ndarray,
     print(f"  → {p}")
 
 
-
-def plot_spectrum(spectra: dict[int, np.ndarray], bin_edges: np.ndarray,
-                  out_dir: Path, title_suffix: str = "full detector",
+def plot_spectrum(spectra: dict[int, np.ndarray],
+                  bin_edges: np.ndarray,
+                  out_dir: Path,
+                  title_suffix: str = "full detector",
                   events: np.ndarray | None = None) -> None:
     """
-    Per-grade and grouped event spectra (adu_sum = cluster-summed charge).
+    Cluster-size spectra (adu_sum = cluster-summed charge).
 
-    If *events* is supplied, also plots the seed spectrum (adu_seed = centre
-    pixel only) overlaid on the all-grades sum, so you can see the shift
-    caused by charge splitting.
+    spectra keys are n_pixels (1=single, 2=double, 3=triple, 4=quad, 5=large).
+    Grade assignment is deferred to energy_cal; here we show cluster size only.
 
-    Automatically detects if the bin range misses the peaks and adjusts.
+    Panels:
+      1. Per cluster-size spectra
+      2. Seed vs cluster-sum comparison (if events supplied)
     """
     if events is not None and len(events):
         bin_edges = _adjust_bin_range(events, bin_edges)
 
-    centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    n_panels = 3 if (events is not None and len(events)) else 2
-    fig, axes = plt.subplots(1, n_panels, figsize=(7*n_panels, 5))
-    fig.suptitle(f"Fe-55 Spectrum  ({title_suffix})", fontsize=13,
-                 fontweight="bold")
+    centres  = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    n_panels = 2 if (events is not None and len(events)) else 1
+    fig, axes = plt.subplots(1, n_panels, figsize=(8 * n_panels, 5))
+    if n_panels == 1:
+        axes = [axes]
 
-    # Panel 1: per-grade — iterate only over grades that exist in palette
+    fig.suptitle(f"Fe-55 Spectrum — {title_suffix}\n"
+                 f"(cluster-summed ADU, no grade assignment yet)",
+                 fontsize=12, fontweight="bold")
+
+    # Colours and labels per cluster size
+    _SIZE_COLOUR = {1: "#2196F3",   # blue   — single
+                    2: "#4CAF50",   # green  — double
+                    3: "#FF9800",   # orange — triple
+                    4: "#E91E63",   # pink   — quadruple
+                    5: "#9C27B0"}   # purple — large (≥5 pixels)
+    _SIZE_LABEL  = {1: "single (n=1)",
+                    2: "double (n=2)",
+                    3: "triple (n=3)",
+                    4: "quadruple (n=4)",
+                    5: "large (n≥5)"}
+
     ax = axes[0]
-    for g in sorted(_get_grade_palette().keys()):
-        counts = spectra.get(g, None)
-        if counts is None or counts.sum() == 0:
+    total = np.zeros(len(centres), dtype=np.int64)
+    for n in sorted(_SIZE_COLOUR.keys()):
+        counts = spectra.get(n, np.zeros(len(centres), dtype=np.int64))
+        if counts.sum() == 0:
             continue
         ax.step(centres, counts, where="mid",
-                color=_get_grade_palette()[g], alpha=0.75, lw=0.9,
-                label=f"G{g} {GRADE_NAMES.get(g,'')}")
-    ax.set_xlabel("Summed ADU (cluster)"); ax.set_ylabel("Counts / bin")
-    ax.set_title("Per-Grade  (cluster-summed charge)")
-    ax.set_yscale("log"); ax.grid(alpha=0.3); ax.legend(fontsize=7, ncol=2)
+                color=_SIZE_COLOUR[n], lw=1.2, alpha=0.85,
+                label=_SIZE_LABEL[n])
+        total += counts
+    ax.step(centres, total, where="mid", color="black",
+            lw=1.0, ls="--", alpha=0.7, label="all (cluster sum)")
+    ax.set_xlabel("Summed ADU (cluster)")
+    ax.set_ylabel("Counts / bin")
+    ax.set_title("Per Cluster Size\n"
+                 "(grade assigned after energy calibration)")
+    ax.set_yscale("log")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=9)
 
-    # Panel 2: grouped — built dynamically from _GRADE_DEFS
-    ax2 = axes[1]
-    from ..physics.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
-    from collections import defaultdict
-
-    # Re-group by label prefix (same logic as _build_group_label)
-    prefix_groups: dict[str, list[int]] = defaultdict(list)
-    for gid, label, _ in _GRADE_DEFS:
-        prefix_groups[label.split()[0]].append(gid)
-
-    for prefix, gids in sorted(prefix_groups.items(),
-                                key=lambda kv: min(kv[1])):
-        gids_sorted = sorted(gids)
-        total = sum(spectra.get(g, np.zeros(len(centres), dtype=int))
-                    for g in gids_sorted)
-        if total.sum() == 0:
-            continue
-        key = gids_sorted[0]
-        ax2.step(centres, total, where="mid",
-                 color=_get_grade_palette().get(key, "#aaaaaa"),
-                 lw=1.2, alpha=0.9,
-                 label=_get_group_label().get(key, prefix))
-
-    # "other" group
-    other_counts = spectra.get(GRADE_OTHER,
-                               np.zeros(len(centres), dtype=int))
-    if other_counts.sum() > 0:
-        ax2.step(centres, other_counts, where="mid",
-                 color=_get_grade_palette()[GRADE_OTHER],
-                 lw=1.2, alpha=0.9,
-                 label=_get_group_label()[GRADE_OTHER])
-
-    # All-grades sum
-    all_c = sum(spectra.get(g, np.zeros(len(centres), dtype=int))
-                for g in _get_grade_palette().keys())
-    ax2.step(centres, all_c, where="mid", color="black",
-             lw=1.0, ls="--", alpha=0.8, label="all grades (cluster sum)")
-    ax2.set_xlabel("Summed ADU (cluster)"); ax2.set_ylabel("Counts / bin")
-    ax2.set_title("Grouped  (cluster-summed charge)")
-    ax2.set_yscale("log"); ax2.grid(alpha=0.3); ax2.legend(fontsize=8)
-
-    # Panel 3: seed vs sum comparison (only when events available)
-    if n_panels == 3 and events is not None:
-        ax3 = axes[2]
+    # Panel 2: seed vs sum
+    if n_panels == 2 and events is not None:
+        ax2 = axes[1]
         c_seed, _ = np.histogram(events["adu_seed"], bins=bin_edges)
         c_sum,  _ = np.histogram(events["adu_sum"],  bins=bin_edges)
-        ax3.step(centres, c_seed, where="mid", color="tomato", lw=1.2,
-                 alpha=0.9, label="seed pixel only  (centre, not summed)")
-        ax3.step(centres, c_sum,  where="mid", color="steelblue", lw=1.2,
-                 alpha=0.9, label="cluster sum  (adu_sum)")
-        ax3.set_xlabel("ADU"); ax3.set_ylabel("Counts / bin")
-        ax3.set_title("Seed vs Cluster-sum\n"
+        ax2.step(centres, c_seed, where="mid", color="tomato",  lw=1.2,
+                 alpha=0.9, label="seed pixel (adu_seed)")
+        ax2.step(centres, c_sum,  where="mid", color="steelblue", lw=1.2,
+                 alpha=0.9, label="cluster sum (adu_sum)")
+        ax2.set_xlabel("ADU")
+        ax2.set_ylabel("Counts / bin")
+        ax2.set_title("Seed vs Cluster-sum\n"
                       "(splits push adu_sum right of adu_seed)")
-        ax3.set_yscale("log"); ax3.grid(alpha=0.3); ax3.legend(fontsize=8)
-        ax3.text(0.02, 0.97,
-                 "If peaks coincide → mostly singles\n"
-                 "If adu_sum peak shifts right → charge shared\n"
-                 "adu_seed always shows single-pixel energy",
-                 transform=ax3.transAxes, va="top", fontsize=7,
-                 bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow", alpha=0.8))
+        ax2.set_yscale("log")
+        ax2.grid(alpha=0.3)
+        ax2.legend(fontsize=9)
 
     plt.tight_layout()
-    slug = title_suffix.replace(" ","_").replace("/","_")
+    slug = title_suffix.replace(" ", "_").replace("/", "_")
     p = out_dir / f"spectrum_{slug}.png"
-    fig.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig)
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
     print(f"  → {p}")
 
 
+def plot_cluster_size_distribution(events: np.ndarray,
+                                    out_dir: Path) -> None:
+    """
+    Bar chart of event count per cluster size (n_pixels).
 
-def plot_grade_distribution(events: np.ndarray, out_dir: Path) -> None:
-    """Bar chart of event count per grade."""
-    # Build grade list dynamically so new grades are picked up automatically
-    all_grades = sorted(_get_grade_palette().keys())
-    counts     = [int((events["grade"] == g).sum()) for g in all_grades]
-    labels     = [f"G{g}" for g in all_grades]
-    colours    = [_get_grade_palette()[g] for g in all_grades]
+    Replaces plot_grade_distribution for the event_rec stage.
+    Grade distribution will be plotted by energy_cal after calibration.
+    """
+    sizes  = np.arange(1, 7)
+    counts = [int((events["n_pixels"] == n).sum()) for n in sizes]
+    labels = ["single\n(n=1)", "double\n(n=2)", "triple\n(n=3)",
+              "quad\n(n=4)",   "penta\n(n=5)",  "large\n(n≥6)"]
+    # merge n≥6 into last bin
+    counts[-1] = int((events["n_pixels"] >= 6).sum())
+    colours = ["#2196F3", "#4CAF50", "#FF9800",
+               "#E91E63", "#9C27B0", "#607D8B"]
 
-    fig, ax = plt.subplots(figsize=(max(12, len(all_grades)), 4))
-    bars = ax.bar(range(len(all_grades)), counts,
+    fig, ax = plt.subplots(figsize=(9, 4))
+    bars = ax.bar(range(len(sizes)), counts,
                   color=colours, edgecolor="white", lw=0.5)
-    ax.set_xticks(range(len(all_grades)))
-    ax.set_xticklabels(labels, fontsize=8)
-    ax.set_xlabel("Grade"); ax.set_ylabel("Event count")
-    ax.set_title("Event Count per Grade", fontsize=12, fontweight="bold")
-    ax.set_yscale("log"); ax.grid(axis="y", alpha=0.3)
+    ax.set_xticks(range(len(sizes)))
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_xlabel("Cluster size (pixels)")
+    ax.set_ylabel("Event count")
+    ax.set_title("Event Count per Cluster Size\n"
+                 "(grade assigned after energy calibration)",
+                 fontsize=11, fontweight="bold")
+    ax.set_yscale("log")
+    ax.grid(axis="y", alpha=0.3)
     for bar, cnt in zip(bars, counts):
         if cnt > 0:
-            ax.text(bar.get_x() + bar.get_width()/2, cnt*1.1,
-                    f"{cnt:,}", ha="center", va="bottom", fontsize=7)
-
+            ax.text(bar.get_x() + bar.get_width() / 2, cnt * 1.15,
+                    f"{cnt:,}", ha="center", va="bottom", fontsize=8)
     plt.tight_layout()
-    p = out_dir / "grade_distribution.png"
-    fig.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig)
+    p = out_dir / "cluster_size_distribution.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
     print(f"  → {p}")
-
 
 
 def plot_raw_spectrum(

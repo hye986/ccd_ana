@@ -1,80 +1,66 @@
 """
-pnccd_ana.physics.pattern_recognition
-======================================
-Photon-event recognition using connected-component clustering.
+pnccd_ana.physics.event_filter
+==============================
+Photon-event detection using connected-component clustering.
 
-Algorithm (matches ROOT HStepFilterEvents4)
-────────────────────────────────────────────
+Matches ROOT HStepFilterEvents4 — stores raw cluster data without
+grade assignment.  Grade classification is deferred to the energy
+calibration step where gain and CTI corrections stabilise the argmax
+pixel and make pattern recognition reliable.
+
+Algorithm
+─────────
   1. THRESHOLD SCAN
-     Collect every pixel above split_sigma × noise into the candidate set
-     (secondary threshold = ROOT ThresSec).
-     ThresSec is clamped to ThresPrm per-pixel (ROOT behaviour):
-       if ThresSec[px] > ThresPrm[px]: ThresSec[px] = ThresPrm[px]
+       sec_mask  = frame > split_sigma × noise   (ROOT ThresSec)
+       prim_mask = frame > seed_sigma  × noise   (ROOT ThresPrm)
+     ThresSec is clamped to ThresPrm per pixel (ROOT behaviour).
+     Excluded pixels (bad_pixel_mask, search_mask) are zeroed.
 
-  2. CONNECTED-COMPONENT LABELLING  (4-connected, no diagonal)
-     Neighbours: left (same row, col-1) and below (row-1, same col).
-     Matches ROOT HStepFilterEvents4 exactly.
-     scipy.ndimage.label with _STRUCT_NO_DIAG is used when available.
+  2. 4-CONNECTED COMPONENT LABELLING on sec_mask.
+     No diagonal neighbours — matches ROOT HStepFilterEvents4 exactly.
+     scipy.ndimage.label used when available; pure-Python union-find
+     fallback otherwise.
 
-  3. ACCEPT / REJECT
-     A cluster is accepted only if at least one pixel exceeds
-     seed_sigma × noise (primary threshold = ROOT ThresPrm).
-     Border pixels are FLAGGED (kPixBorder) but NOT excluded from seeding,
-     matching ROOT which stores border flag for downstream filtering.
+  3. ACCEPT cluster if ≥1 pixel > prim_mask (ROOT: HasExceededPrimThresh).
 
-  4. SHAPE CLASSIFICATION
-     Within the accepted cluster:
-       · seed     = pixel with maximum ADU value
-       · offsets  = frozenset of (dY, dX) of every other pixel relative to seed
-       · grade    = _GRADE_LOOKUP.get(frozenset(offsets), GRADE_OTHER)
+  4. STORE per cluster:
+       Y, X      — seed pixel coordinates (argmax ADU)
+       adu_sum   — sum of ALL cluster pixels (gain-independent)
+       adu_seed  — ADU of seed pixel
+       n_pixels  — cluster size (1=single, 2=double, 3=triple, 4=quad, ...)
+       flag      — border / overflow / underflow bitmask
 
-     NOTE on quadruples (grades 9–12):
-       A 2×2 block has 4 pixels.  When the seed (argmax) is at one corner,
-       the other 3 pixels produce offsets that always include a diagonal.
-       Example: seed at bottom-left (0,0), others at (1,0),(0,1),(1,1):
-         offsets = {(+1,0),(0,+1),(+1,+1)} → grade 9.
-       If the diagonal pixel falls below split_sigma its ADU is excluded
-       and the cluster becomes a triple → grade 5/6/7/8.
-       Lowering split_sigma recovers the diagonal pixel.
-
-  5. ADU SUM
-     Sum ALL pixels in the cluster regardless of grade.
-
-Grade definitions — SINGLE SOURCE OF TRUTH
-────────────────────────────────────────────
-  Neighbour offsets are (dY, dX) relative to the seed pixel (0, 0).
-  The seed is the maximum-ADU pixel in the cluster.
-
-   0  single      no neighbours above split threshold
-   1  double      (0,+1)
-   2  double      (+1, 0)
-   3  double      (0,-1)
-   4  double      (-1, 0)
-   5  triple      (+1, 0)+(0,+1)              L bottom-left corner
-   6  triple      (0,-1)+(+1, 0)              L bottom-right corner
-   7  triple      (-1, 0)+(0,-1)              L top-right corner
-   8  triple      (-1, 0)+(0,+1)              L top-left corner
-   9  quadruple   (+1, 0)+(0,+1)+(+1,+1)     2×2 seed=bottom-left
-  10  quadruple   (+1, 0)+(0,-1)+(+1,-1)     2×2 seed=bottom-right
-  11  quadruple   (-1, 0)+(0,-1)+(-1,-1)     2×2 seed=top-right
-  12  quadruple   (-1, 0)+(0,+1)+(-1,+1)     2×2 seed=top-left
-  13  other       any cluster shape not listed above
+  Grade assignment is NOT done here.  After energy calibration:
+       n_pixels == 1  →  single   (grade 0)
+       n_pixels == 2  →  double   (grades 1–4)
+       n_pixels == 3  →  triple   (grades 5–8)
+       n_pixels == 4  →  quadruple (grades 9–12 or other)
+       n_pixels >= 5  →  larger pattern
 
 Coordinate convention
 ──────────────────────
   data[Y, X]   Y = row (axis 0),  X = col (axis 1)
   Y = 0 is the first readout row (rolling shutter bottom).
 
-Why quadruples show flat enhancement
-──────────────────────────────────────
-  ROOT classifies grade in a downstream gain-calibration step, not in the
-  filter step.  The filter stores raw clusters; grade is assigned after gain
-  correction when charge sharing is better resolved.  Here we classify in
-  find_events directly, so grade depends on whether the diagonal pixel
-  exceeds split_sigma × noise.  If split_sigma is too high, many genuine
-  2×2 quadruples lose their diagonal pixel and fall into GRADE_OTHER,
-  creating the flat enhancement.  Lowering split_sigma (e.g. from 3→2) or
-  using the even/odd CM correction (which reduces noise) recovers them.
+Grade table (kept here for energy_cal reuse)
+─────────────────────────────────────────────
+  Neighbour offsets are (dY, dX) relative to the seed pixel (0, 0).
+  The seed is the maximum-ADU pixel in the gain-corrected cluster.
+
+   0  single      no neighbours
+   1  double      (0,+1)
+   2  double      (+1, 0)
+   3  double      (0,-1)
+   4  double      (-1, 0)
+   5  triple      (+1, 0)+(0,+1)
+   6  triple      (0,-1)+(+1, 0)
+   7  triple      (-1, 0)+(0,-1)
+   8  triple      (-1, 0)+(0,+1)
+   9  quadruple   (+1, 0)+(0,+1)+(+1,+1)   2×2 seed=bottom-left
+  10  quadruple   (+1, 0)+(0,-1)+(+1,-1)   2×2 seed=bottom-right
+  11  quadruple   (-1, 0)+(0,-1)+(-1,-1)   2×2 seed=top-right
+  12  quadruple   (-1, 0)+(0,+1)+(-1,+1)   2×2 seed=top-left
+  13  other       any unrecognised shape
 """
 
 from __future__ import annotations
@@ -89,7 +75,7 @@ from pathlib import Path
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Grade definitions — edit ONLY this table
+# Grade table — kept here so energy_cal can import it for post-cal grading
 # ══════════════════════════════════════════════════════════════════════════════
 
 _GRADE_DEFS: list[tuple[int, str, frozenset]] = [
@@ -109,13 +95,12 @@ _GRADE_DEFS: list[tuple[int, str, frozenset]] = [
 ]
 
 GRADE_OTHER    = 13
-GRADE_REJECTED = -1   # internal sentinel, never stored in output
+GRADE_REJECTED = -1
 N_GRADES       = GRADE_OTHER + 1   # 0..13 inclusive
 
 GRADE_NAMES: dict[int, str] = {g: name for g, name, _ in _GRADE_DEFS}
 GRADE_NAMES[GRADE_OTHER] = "other"
 
-# frozenset(offsets) → grade_id  (built once at import)
 _GRADE_LOOKUP: dict[frozenset, int] = {
     offsets: gid for gid, _, offsets in _GRADE_DEFS
 }
@@ -124,20 +109,18 @@ _GRADE_DEFS_BY_ID: dict[int, tuple[str, frozenset]] = {
     gid: (label, offsets) for gid, label, offsets in _GRADE_DEFS
 }
 
-_KNOWN_OFFSET_SETS: set[frozenset] = {offsets for _, _, offsets in _GRADE_DEFS}
-
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Output dtype
+# Output dtype  (Option A: no grade field)
 # ══════════════════════════════════════════════════════════════════════════════
 
 EVENT_DTYPE = np.dtype([
-    ("Y",        np.int16),
-    ("X",        np.int16),
-    ("grade",    np.int8),
-    ("adu_sum",  np.float32),   # sum of ALL pixels in the cluster
-    ("adu_seed", np.float32),   # value of the maximum-ADU pixel
-    ("flag",     np.uint8),     # bitmask: border / overflow / misfit
+    ("Y",        np.int16),    # seed pixel row
+    ("X",        np.int16),    # seed pixel column
+    ("adu_sum",  np.float32),  # sum of ALL cluster pixels
+    ("adu_seed", np.float32),  # ADU of seed (argmax) pixel
+    ("n_pixels", np.uint8),    # cluster size (1=single,2=double,3=triple,4=quad)
+    ("flag",     np.uint8),    # bitmask: border/overflow/underflow
 ])
 
 # Flag bits (matching ROOT HEventFlags kPix* values)
@@ -151,7 +134,6 @@ FLAG_MISFIT    = np.uint8(1 << 2)   # kPixMisfit
 # Connected-component labelling (4-connected, no diagonal)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Structure matches ROOT: left, right, above, below — no diagonal
 _STRUCT_NO_DIAG = np.array([[0, 1, 0],
                              [1, 1, 1],
                              [0, 1, 0]], dtype=np.int32)
@@ -159,24 +141,20 @@ _STRUCT_NO_DIAG = np.array([[0, 1, 0],
 
 def _find_clusters(sec_mask: np.ndarray) -> np.ndarray:
     """
-    Assign a cluster ID to every above-threshold pixel.
-
-    Uses scipy.ndimage.label with 4-connected structure when available.
-    Falls back to a correct union-find implementation otherwise.
+    4-connected component labelling on sec_mask.
 
     Parameters
     ----------
-    sec_mask : bool (n_Y, n_X) — True where pixel > split_sigma × noise
+    sec_mask : bool (n_Y, n_X)
 
     Returns
     -------
-    label_map : int32 (n_Y, n_X), 0 = background, >0 = cluster ID
+    label_map : int32 (n_Y, n_X), 0=background, >0=cluster ID
     """
     if _HAVE_SCIPY:
         label_map, _ = _scipy_label(sec_mask, structure=_STRUCT_NO_DIAG)
         return label_map.astype(np.int32)
 
-    # ── Pure-Python union-find fallback ───────────────────────────────────────
     import warnings
     warnings.warn(
         "scipy not found — using slow Python union-find.\n"
@@ -185,7 +163,6 @@ def _find_clusters(sec_mask: np.ndarray) -> np.ndarray:
 
     n_Y, n_X  = sec_mask.shape
     label_map = np.zeros((n_Y, n_X), dtype=np.int32)
-
     parent: list[int] = [0]
 
     def _find(x: int) -> int:
@@ -202,17 +179,13 @@ def _find_clusters(sec_mask: np.ndarray) -> np.ndarray:
         parent[drop] = keep
         return keep
 
-    flat_idx = np.flatnonzero(sec_mask)
-
-    for idx in flat_idx:
+    for idx in np.flatnonzero(sec_mask):
         y = int(idx // n_X)
         x = int(idx  % n_X)
-
         left_label  = int(label_map[y, x - 1]) if x > 0 else 0
         below_label = int(label_map[y - 1, x]) if y > 0 else 0
-
-        left_root  = _find(left_label)  if left_label  else 0
-        below_root = _find(below_label) if below_label else 0
+        left_root   = _find(left_label)  if left_label  else 0
+        below_root  = _find(below_label) if below_label else 0
 
         if left_root == 0 and below_root == 0:
             new_lbl = len(parent)
@@ -223,10 +196,9 @@ def _find_clusters(sec_mask: np.ndarray) -> np.ndarray:
         elif left_root == 0 and below_root != 0:
             label_map[y, x] = below_root
         else:
-            merged = _union(left_root, below_root)
-            label_map[y, x] = merged
+            label_map[y, x] = _union(left_root, below_root)
 
-    for idx in flat_idx:
+    for idx in np.flatnonzero(sec_mask):
         y = int(idx // n_X)
         x = int(idx  % n_X)
         label_map[y, x] = _find(int(label_map[y, x]))
@@ -235,37 +207,29 @@ def _find_clusters(sec_mask: np.ndarray) -> np.ndarray:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Shape classification
+# Grade classification (used by energy_cal after gain+CTI correction)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _classify_cluster(ys: np.ndarray,
-                      xs: np.ndarray,
-                      seed_idx: int) -> int:
+def classify_cluster(ys: np.ndarray,
+                     xs: np.ndarray,
+                     seed_idx: int) -> int:
     """
-    Classify cluster shape using the argmax pixel as seed.
+    Classify cluster shape relative to the seed (argmax) pixel.
 
-    The grade is determined by the frozenset of (dY, dX) offsets of all
-    other pixels relative to the seed (argmax) pixel.  This matches ROOT
-    HStepFilterEvents4 which collects all pixels above ThresSec into a
-    cluster and uses the highest-ADU pixel as the reference for shape lookup.
-
-    For 2×2 quadruples: the diagonal pixel must also be above split_sigma
-    to appear in the cluster.  If it is not, the pattern becomes a triple.
-    This is physically correct: ROOT uses the same two-threshold scheme.
+    Should be called AFTER gain and CTI correction so that the argmax
+    pixel is stable and the pattern is reliably recognised.
 
     Parameters
     ----------
     ys       : int array — Y coordinates of all cluster pixels
     xs       : int array — X coordinates of all cluster pixels
-    seed_idx : int — index of the argmax (seed) pixel in ys/xs
+    seed_idx : int — index of the argmax (seed) pixel
 
     Returns
     -------
     grade : int — from _GRADE_LOOKUP or GRADE_OTHER
     """
-    sy = ys[seed_idx]
-    sx = xs[seed_idx]
-
+    sy, sx = ys[seed_idx], xs[seed_idx]
     neighbours = frozenset(
         (int(ys[j] - sy), int(xs[j] - sx))
         for j in range(len(ys))
@@ -284,75 +248,45 @@ def find_events(
         search_mask:       np.ndarray | None = None,
         seed_sigma:        float = 5.0,
         split_sigma:       float = 3.0,
-        reject_extra:      bool  = False,
         bad_pixel_mask:    np.ndarray | None = None,
         clamp_sec_to_prim: bool  = True,
         flag_border:       bool  = True,
 ) -> np.ndarray:
     """
-    Find and classify photon events in a single CM-corrected frame.
+    Find photon events in a single CM-corrected frame.
 
-    Algorithm  (ROOT HStepFilterEvents4 equivalent)
-    ────────────────────────────────────────────────
-    1. Build pixel masks:
-         prim_mask = frame > seed_sigma  × noise   (ThresPrm)
-         sec_mask  = frame > split_sigma × noise   (ThresSec)
-       If clamp_sec_to_prim: sec_thr = min(sec_thr, prim_thr) per pixel.
-       Excluded pixels (search_mask=False or bad_pixel_mask=True) are
-       zeroed so they cannot be seeds or neighbours.
-
-    2. 4-connected component labelling on sec_mask.
-       No diagonal neighbours — matches ROOT exactly.
-
-    3. Accept cluster if ≥1 pixel in prim_mask.
-
-    4. Within each accepted cluster:
-         seed     = pixel with maximum ADU
-         grade    = _classify_cluster (argmax seed, no multi-seed fallback)
-         flag     = OR of per-pixel flags (border / overflow / underflow)
-
-       Quadruple grades 9–12 require the diagonal pixel to also be above
-       split_sigma.  If not, the event is classified as triple or other.
-       Lowering split_sigma recovers more quadruples.
-
-    5. adu_sum  = sum of ALL cluster pixels
-       adu_seed = ADU of the seed (argmax) pixel
+    Matches ROOT HStepFilterEvents4 — stores raw cluster data only.
+    Grade assignment is deferred to energy_cal.
 
     Parameters
     ----------
     corrected          : float32 (n_Y, n_X) — CM-corrected frame
     noise_map          : float32 (n_Y, n_X) — per-pixel noise [ADU RMS]
     search_mask        : bool (n_Y, n_X) or None — True = active pixel
-    seed_sigma         : primary threshold multiplier   (ROOT ThresPrm, typ. 5)
-    split_sigma        : secondary threshold multiplier (ROOT ThresSec, typ. 3)
-    reject_extra       : if True, discard GRADE_OTHER events
-    bad_pixel_mask     : bool (n_Y, n_X) or None — True = bad, always excluded
-    clamp_sec_to_prim  : clamp sec threshold to prim per pixel (ROOT behaviour)
-    flag_border        : attach FLAG_BORDER to events touching detector edge
+    seed_sigma         : primary threshold   (ROOT ThresPrm, typ. 5)
+    split_sigma        : secondary threshold (ROOT ThresSec, typ. 3)
+    bad_pixel_mask     : bool (n_Y, n_X) or None
+    clamp_sec_to_prim  : clamp sec threshold to prim per pixel (ROOT)
+    flag_border        : attach FLAG_BORDER to edge-touching events
 
     Returns
     -------
-    events : structured array with fields Y, X, grade, adu_sum, adu_seed, flag
-             Y, X are the coordinates of the seed (argmax) pixel.
+    events : structured array EVENT_DTYPE
+             fields: Y, X, adu_sum, adu_seed, n_pixels, flag
     """
     frame = np.ascontiguousarray(corrected, dtype=np.float32)
     noise = np.ascontiguousarray(noise_map, dtype=np.float32)
     H, W  = frame.shape
 
     # ── Border mask ───────────────────────────────────────────────────────────
-    # ROOT sets kPixBorder but does NOT exclude border pixels from seeding.
     border_mask = np.zeros((H, W), dtype=bool)
     if flag_border:
-        border_mask[0,  :]  = True
-        border_mask[-1, :]  = True
-        border_mask[:,  0]  = True
-        border_mask[:, -1]  = True
+        border_mask[0,  :] = True
+        border_mask[-1, :] = True
+        border_mask[:,  0] = True
+        border_mask[:, -1] = True
 
-    # ── Build combined exclusion mask and zero excluded pixels ────────────────
-    # Excluded pixels cannot be seeds or cluster members.
-    # This matches ROOT which skips underflow pixels in the threshold scan
-    # and uses a BadPixels mask to exclude them from CM but NOT from the
-    # frame (bad pixels still get CM subtracted).
+    # ── Exclusion mask ────────────────────────────────────────────────────────
     include: np.ndarray | None = None
     if search_mask is not None:
         include = search_mask.astype(bool, copy=False)
@@ -366,81 +300,67 @@ def find_events(
     # ── Threshold maps ────────────────────────────────────────────────────────
     prim_thr = (seed_sigma  * noise).astype(np.float32)
     sec_thr  = (split_sigma * noise).astype(np.float32)
-
-    # ROOT: ThresSec clamped to ThresPrm per pixel
     if clamp_sec_to_prim:
         np.minimum(sec_thr, prim_thr, out=sec_thr)
 
     prim_mask = frame > prim_thr
-    sec_mask  = frame > sec_thr    # ⊇ prim_mask after clamping
+    sec_mask  = frame > sec_thr
 
     if not sec_mask.any():
         return np.empty(0, dtype=EVENT_DTYPE)
 
-    # ── Connected-component labelling ─────────────────────────────────────────
+    # ── Clustering ────────────────────────────────────────────────────────────
     label_map = _find_clusters(sec_mask)
 
-    # ── Cluster IDs that contain ≥1 primary pixel ─────────────────────────────
     primary_labels = set(
         int(v) for v in np.unique(label_map[prim_mask]) if v > 0
     )
     if not primary_labels:
         return np.empty(0, dtype=EVENT_DTYPE)
 
-    # ── Process each accepted cluster ─────────────────────────────────────────
-    rows_l:   list[int]   = []
-    cols_l:   list[int]   = []
-    grades_l: list[int]   = []
-    sigs_l:   list[float] = []
-    seeds_l:  list[float] = []
-    flags_l:  list[int]   = []
+    # ── Build output arrays ───────────────────────────────────────────────────
+    rows_l:    list[int]   = []
+    cols_l:    list[int]   = []
+    sigs_l:    list[float] = []
+    seeds_l:   list[float] = []
+    npix_l:    list[int]   = []
+    flags_l:   list[int]   = []
 
     for cid in primary_labels:
         pix_mask = label_map == cid
         ys, xs   = np.nonzero(pix_mask)
         vals     = frame[ys, xs]
 
-        # Seed = maximum ADU pixel (matches ROOT argmax)
         seed_idx = int(np.argmax(vals))
         sy       = int(ys[seed_idx])
         sx       = int(xs[seed_idx])
-        seed_val = float(vals[seed_idx])
 
-        # Grade from argmax seed — no multi-seed fallback
-        grade = _classify_cluster(ys, xs, seed_idx)
-
-        if reject_extra and grade == GRADE_OTHER:
-            continue
-
-        # Per-event flag (OR of per-pixel flags)
         evt_flag = np.uint8(0)
         if flag_border and border_mask[ys, xs].any():
             evt_flag |= FLAG_BORDER
 
-        adu_sum = float(vals.sum())
-
         rows_l.append(sy)
         cols_l.append(sx)
-        grades_l.append(grade)
-        sigs_l.append(adu_sum)
-        seeds_l.append(seed_val)
+        sigs_l.append(float(vals.sum()))
+        seeds_l.append(float(vals[seed_idx]))
+        npix_l.append(int(len(ys)))
         flags_l.append(int(evt_flag))
 
     if not rows_l:
         return np.empty(0, dtype=EVENT_DTYPE)
 
     out = np.empty(len(rows_l), dtype=EVENT_DTYPE)
-    out["Y"]        = np.array(rows_l,   dtype=np.int16)
-    out["X"]        = np.array(cols_l,   dtype=np.int16)
-    out["grade"]    = np.array(grades_l, dtype=np.int8)
-    out["adu_sum"]  = np.array(sigs_l,   dtype=np.float32)
-    out["adu_seed"] = np.array(seeds_l,  dtype=np.float32)
-    out["flag"]     = np.array(flags_l,  dtype=np.uint8)
+    out["Y"]        = np.array(rows_l,  dtype=np.int16)
+    out["X"]        = np.array(cols_l,  dtype=np.int16)
+    out["adu_sum"]  = np.array(sigs_l,  dtype=np.float32)
+    out["adu_seed"] = np.array(seeds_l, dtype=np.float32)
+    out["n_pixels"] = np.array(npix_l,  dtype=np.uint8)
+    out["flag"]     = np.array(flags_l, dtype=np.uint8)
     return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Helpers retained for energy_cal / plotting compatibility
+# Helpers for energy_cal
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _offsets_to_bitmask(offsets: frozenset) -> int:
@@ -451,12 +371,13 @@ def _offsets_to_bitmask(offsets: frozenset) -> int:
     mask = 0
     for off in offsets:
         if off not in _OFFSET_TO_BIT:
-            raise ValueError(f"Offset {off} outside central 3×3 neighbours.")
+            raise ValueError(f"Offset {off} outside 3×3 neighbourhood.")
         mask |= (1 << _OFFSET_TO_BIT[off])
     return mask
 
 
 def build_c_grade_table() -> list[int]:
+    """Build 256-entry lookup table for C/GPU grade classification."""
     table = [GRADE_OTHER] * 256
     for gid, _, offsets in _GRADE_DEFS:
         mask = _offsets_to_bitmask(offsets)
@@ -469,6 +390,7 @@ def build_c_grade_table() -> list[int]:
 
 
 def write_grade_table_header(path: str | Path | None = None) -> Path:
+    """Write C header with grade lookup table for downstream C/GPU code."""
     table = build_c_grade_table()
     if path is None:
         path = Path(__file__).with_name("_grade_table_generated.h")

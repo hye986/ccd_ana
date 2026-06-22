@@ -409,7 +409,7 @@ def load_calibration_h5(
 def save_events_h5(
         out_path:  str | Path,
         events:    np.ndarray,
-        spectra:   dict[int, np.ndarray],
+        spectra:   dict[int, np.ndarray],   # key = n_pixels (1..5)
         bin_edges: np.ndarray,
         hit_count: np.ndarray,
         mean_adu:  np.ndarray,
@@ -420,12 +420,12 @@ def save_events_h5(
 
     Structure::
 
-        /events/Y, X, grade, adu_sum    (structured array columns)
-        /spectra/grade<NN>              (histogram counts per grade)
+        /events/Y, X, adu_sum, adu_seed, n_pixels, flag
+        /spectra/npix<N>        histogram counts per cluster size
         /spectra/bin_edges
         /maps/hit_count
         /maps/mean_adu
-        /meta/<key>                     (optional metadata)
+        /meta/<key>
     """
     print(f"\nSaving events HDF5: {out_path}")
     with h5py.File(out_path, "w") as f:
@@ -436,8 +436,8 @@ def save_events_h5(
 
         sg = f.require_group("spectra")
         sg.create_dataset("bin_edges", data=bin_edges)
-        for g, counts in spectra.items():
-            sg.create_dataset(f"grade{g:02d}", data=counts, compression="gzip")
+        for n, counts in spectra.items():
+            sg.create_dataset(f"npix{n:02d}", data=counts, compression="gzip")
 
         mg = f.require_group("maps")
         mg.create_dataset("hit_count", data=hit_count, compression="gzip")
@@ -451,51 +451,48 @@ def save_events_h5(
     print("  ✓ saved.")
 
 
-def load_events_h5(
-        h5_path: str | Path,
-) -> dict:
+def load_events_h5(h5_path: str | Path) -> dict:
     """
-    Load source-analysis results from HDF5 (produced by save_events_h5).
+    Load source-analysis results from HDF5.
 
-    Returns dict with keys: events, spectra, bin_edges, hit_count, mean_adu, meta.
-    Suitable as input for downstream gain/CTI calibration steps.
+    Returns dict: events, spectra, bin_edges, hit_count, mean_adu, meta.
+    events has fields: Y, X, adu_sum, adu_seed, n_pixels, flag.
+    spectra keys are n_pixels integers (1..5).
     """
-    from ..physics.pattern_recognition import EVENT_DTYPE
+    from ..physics.event_filter import EVENT_DTYPE
 
     out: dict = {}
     with h5py.File(h5_path, "r") as f:
-        # Events
         eg = f.get("events")
         if eg is not None:
-            n = len(eg["Y"])
+            n   = len(eg["Y"])
             arr = np.empty(n, dtype=EVENT_DTYPE)
             for field in EVENT_DTYPE.names:
-                arr[field] = eg[field][:]
+                if field in eg:
+                    arr[field] = eg[field][:]
+                else:
+                    arr[field] = 0   # graceful default for missing fields
             out["events"] = arr
         else:
             out["events"] = np.empty(0, dtype=EVENT_DTYPE)
 
-        # Spectra
         sg = f["spectra"]
         out["bin_edges"] = sg["bin_edges"][:]
-        out["spectra"] = {}
+        out["spectra"]   = {}
         for key in sg:
-            if key.startswith("grade"):
-                g = int(key[5:])
-                out["spectra"][g] = sg[key][:]
+            if key.startswith("npix"):
+                n = int(key[4:])
+                out["spectra"][n] = sg[key][:]
 
-        # Maps
         mg = f["maps"]
         out["hit_count"] = mg["hit_count"][:]
         out["mean_adu"]  = mg["mean_adu"][:]
 
-        # Metadata
         meta = f.get("meta")
         out["meta"] = dict(meta.attrs) if meta is not None else {}
 
     print(f"  Loaded {len(out['events']):,} events from {h5_path}")
     return out
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # .npy save / load
@@ -836,59 +833,55 @@ def load_energy_cal_results_h5(path: str | Path) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def save_event_rec_results_h5(
-        out_dir:        Path,
-        events:         np.ndarray,
-        spectra:        dict[int, np.ndarray],
-        bin_edges:      np.ndarray,
-        hit_count:      np.ndarray,
-        mean_adu:       np.ndarray,
-        sample_arr:     np.ndarray | None,
-        noise_map:      np.ndarray,
-        gen:            dict,
-        seed_sigma:     float,
-        n_frames:       int,
+        out_dir:    Path,
+        events:     np.ndarray,
+        spectra:    dict[int, np.ndarray],
+        bin_edges:  np.ndarray,
+        hit_count:  np.ndarray,
+        mean_adu:   np.ndarray,
+        sample_arr: np.ndarray | None,
+        noise_map:  np.ndarray,
+        gen:        dict,
+        seed_sigma: float,
+        n_frames:   int,
 ) -> None:
     """
     Save plot-backing data to event_rec_results.h5.
 
-    HDF5 structure:
-        /raw_spectrum/{bin_edges, all_pixels, positive_pixels, above_seed,
-                       seed_threshold_adu, seed_sigma, median_noise_adu}
-        /grade_distribution/{grades, counts, grade_names}
-        /meta/...
+    /raw_spectrum/{bin_edges, all_pixels, positive_pixels, above_seed,
+                   seed_threshold_adu, seed_sigma, median_noise_adu}
+    /cluster_size_distribution/{n_pixels, counts}
+    /meta/...
     """
     path = out_dir / "event_rec_results.h5"
     path.parent.mkdir(parents=True, exist_ok=True)
     print(f"\nSaving event_rec results: {path}")
 
     with h5py.File(path, "w") as f:
-        # ── Raw spectrum ───────────────────────────────────────────────────────
-        raw_data = _compute_raw_spectrum_data(sample_arr, noise_map, bin_edges, seed_sigma)
+
+        # Raw spectrum
+        raw_data = _compute_raw_spectrum_data(
+            sample_arr, noise_map, bin_edges, seed_sigma)
         if raw_data is not None:
             rg = f.require_group("raw_spectrum")
-            rg.create_dataset("bin_edges",          data=raw_data["bin_edges"])
-            rg.create_dataset("all_pixels",         data=raw_data["all_pixels"])
-            rg.create_dataset("positive_pixels",    data=raw_data["positive_pixels"])
-            rg.create_dataset("above_seed",         data=raw_data["above_seed"])
-            rg.create_dataset("seed_threshold_adu", data=raw_data["seed_threshold_adu"])
-            rg.create_dataset("seed_sigma",          data=raw_data["seed_sigma"])
-            rg.create_dataset("median_noise_adu",    data=raw_data["median_noise_adu"])
+            for k, v in raw_data.items():
+                rg.create_dataset(k, data=v)
 
-        # ── Grade distribution ─────────────────────────────────────────────────
+        # Cluster-size distribution (replaces grade_distribution)
         if len(events) > 0:
-            grade_data = _compute_grade_distribution(events)
-            gg = f.require_group("grade_distribution")
-            gg.create_dataset("grades",      data=grade_data["grades"])
-            gg.create_dataset("counts",      data=grade_data["counts"])
-            gg.create_dataset("grade_names", data=[n.encode() for n in grade_data["grade_names"]])
+            npix_vals, npix_counts = np.unique(events["n_pixels"],
+                                               return_counts=True)
+            cg = f.require_group("cluster_size_distribution")
+            cg.create_dataset("n_pixels", data=npix_vals.astype(np.int32))
+            cg.create_dataset("counts",   data=npix_counts.astype(np.int64))
 
-        # ── Metadata ───────────────────────────────────────────────────────────
+        # Metadata
         mg = f.require_group("meta")
-        mg.attrs["seed_sigma"]   = seed_sigma
-        mg.attrs["split_sigma"]  = float(gen.get("split_sigma", 3.0))
-        mg.attrs["n_frames"]     = n_frames
-        mg.attrs["n_events"]     = len(events)
-        mg.attrs["frame_shape"]  = f"{noise_map.shape[0]}x{noise_map.shape[1]}"
+        mg.attrs["seed_sigma"]  = seed_sigma
+        mg.attrs["split_sigma"] = float(gen.get("split_sigma", 3.0))
+        mg.attrs["n_frames"]    = n_frames
+        mg.attrs["n_events"]    = len(events)
+        mg.attrs["frame_shape"] = f"{noise_map.shape[0]}x{noise_map.shape[1]}"
 
     print("  ✓ saved.")
 
@@ -935,36 +928,6 @@ def _compute_raw_spectrum_data(
         "seed_threshold_adu": float(seed_adu),
         "seed_sigma":          float(seed_sigma),
         "median_noise_adu":    med_noise,
-    }
-
-
-def _compute_grade_distribution(events: np.ndarray) -> dict:
-    """Compute grade distribution data from events array."""
-    from ..physics.pattern_recognition import _GRADE_DEFS, GRADE_OTHER
-
-    all_grades = sorted(set(g for g, _, _ in _GRADE_DEFS) | {GRADE_OTHER})
-    grades = []
-    counts = []
-    names  = []
-
-    for g in all_grades:
-        cnt = int((events["grade"] == g).sum())
-        if cnt > 0 or g in [x[0] for x in _GRADE_DEFS]:
-            grades.append(g)
-            counts.append(cnt)
-            # Get grade name
-            for gd_g, gd_label, _ in _GRADE_DEFS:
-                if gd_g == g:
-                    names.append(gd_label)
-                    break
-            else:
-                if g == GRADE_OTHER:
-                    names.append("other")
-
-    return {
-        "grades":      np.array(grades, dtype=np.int32),
-        "counts":      np.array(counts, dtype=np.int64),
-        "grade_names": names,
     }
 
 
