@@ -26,11 +26,12 @@ Rolling shutter
 
 Multi-ASIC geometry
 -------------------
-  For 512 columns with 8 ASICs, each ASIC reads 64 columns:
-    ASIC 0: X=0..63
-    ASIC 1: X=64..127
+  For 512 columns with 8 ASICs, each ASIC reads 64 columns.
+  ASIC naming is reversed from hardware to match the physical layout:
+    ASIC 7: X=0..63     (C7 in code)
+    ASIC 6: X=64..127   (C6 in code)
     ...
-    ASIC 7: X=448..511
+    ASIC 0: X=448..511  (C0 in code)
   
   Common-mode correction is done per-ASIC (64 columns) for better accuracy.
 
@@ -102,7 +103,8 @@ def configure_asics(n_asics: int, width: int, height: int, mask: list[int] | Non
 
     _N_ASICS = n_asics
     ASIC_WIDTH = width // n_asics
-    ASIC_NAMES = [f"C{i}" for i in range(n_asics)]
+    # Reverse naming: C(n_asics-1) has lowest columns, C0 has highest columns
+    ASIC_NAMES = [f"C{n_asics - 1 - i}" for i in range(n_asics)]
     ASIC_MASK = set(mask) if mask else set()
 
     # Populate metadata
@@ -112,11 +114,15 @@ def configure_asics(n_asics: int, width: int, height: int, mask: list[int] | Non
     ASIC_SLICES.clear()
 
     for i in range(n_asics):
-        name = f"C{i}"
-        ASIC_LABEL[name] = f"ASIC {i}" + (" (masked)" if i in ASIC_MASK else "")
-        ASIC_COLORS[name] = _DEFAULT_COLORS[i % len(_DEFAULT_COLORS)]
-        ASIC_GRID_POS[name] = (0, i)
-        # Exclusive upper bounds: Y in [0, height), X in [x0, x1)
+        # Reverse ASIC naming to match hardware: C0 → highest columns,
+        # C(n_asics-1) → lowest columns.
+        # Hardware: col 0-63 = ASIC n_asics-1, col 64-127 = ASIC n_asics-2, ...
+        # Code:      col 0-63 = C(n_asics-1), col 64-127 = C(n_asics-2), ...
+        rev = n_asics - 1 - i
+        name = f"C{rev}"
+        ASIC_LABEL[name] = f"ASIC {rev}" + (" (masked)" if rev in ASIC_MASK else "")
+        ASIC_COLORS[name] = _DEFAULT_COLORS[rev % len(_DEFAULT_COLORS)]
+        ASIC_GRID_POS[name] = (0, rev)
         ASIC_SLICES[name] = (0, height, i * ASIC_WIDTH, (i + 1) * ASIC_WIDTH)
 
 

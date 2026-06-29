@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 
-from ..io.geometry import ASIC_COLORS, ADC_MAX
+from ..io.geometry import ASIC_COLORS, ASIC_NAMES, ASIC_MASK, ADC_MAX
 from .common import _cb, _stats_box
 
 
@@ -40,19 +40,26 @@ def plot_offsets(scope_name: str, r: dict, out_dir: Path,
         disp = arr.copy()
         if active_mask is not None:
             disp = np.where(active_mask, disp, np.nan)
-        
+
         im = axes[0, col].imshow(disp, origin="lower", cmap="viridis",
                                   vmin=vmin, vmax=vmax, aspect="auto")
         axes[0, col].set_title(mname, fontsize=10)
         axes[0, col].set_xlabel("X [detector column]")
         axes[0, col].set_ylabel("Y [detector row]")
-        _cb(axes[0, col], im); _stats_box(axes[0, col], arr, fmt=".1f")
-        flat = arr.ravel()
-        axes[1, col].hist(flat, bins=200,
-                          range=(np.percentile(flat, 0.5), np.percentile(flat, 99.5)),
-                          color="steelblue", edgecolor="none", alpha=0.85)
+        _cb(axes[0, col], im); _stats_box(axes[0, col], disp, fmt=".1f")
+
+        # 1D histogram: only active pixels
+        if active_mask is not None:
+            flat = arr[active_mask]
+        else:
+            flat = arr.ravel()
+        if flat.size > 0:
+            axes[1, col].hist(flat, bins=200,
+                              range=(np.percentile(flat, 0.5), np.percentile(flat, 99.5)),
+                              color="steelblue", edgecolor="none", alpha=0.85)
+            _stats_box(axes[1, col], flat, fmt=".1f")
         axes[1, col].set_xlabel("Offset (ADU)"); axes[1, col].set_ylabel("Pixel count")
-        axes[1, col].grid(axis="y", alpha=0.3); _stats_box(axes[1, col], flat, fmt=".1f")
+        axes[1, col].grid(axis="y", alpha=0.3)
 
     if show_diff:
         diff   = present[0][1] - present[1][1]
@@ -100,19 +107,24 @@ def plot_noise(scope_name: str, r: dict, out_dir: Path,
     noise_disp = noise.copy()
     if active_mask is not None:
         noise_disp = np.where(active_mask, noise_disp, np.nan)
-    
+
     im = axes[0].imshow(noise_disp, origin="lower", cmap="inferno",
                          vmin=0, vmax=float(np.percentile(noise, 99)), aspect="auto")
     axes[0].set_title("Per-Pixel Noise (RMS)")
     axes[0].set_xlabel("X [detector column]"); axes[0].set_ylabel("Y [detector row]")
-    _cb(axes[0], im, "ADU RMS"); _stats_box(axes[0], noise)
+    _cb(axes[0], im, "ADU RMS"); _stats_box(axes[0], noise_disp)
 
-    flat = noise.ravel()
-    axes[1].hist(flat, bins=200, range=(0, float(np.percentile(flat, 99.5))),
-                 color="darkorange", edgecolor="none", alpha=0.85)
+    # Apply active_mask to noise histogram (1D plot)
+    if active_mask is not None:
+        flat = noise[active_mask]
+    else:
+        flat = noise.ravel()
+    if flat.size > 0:
+        axes[1].hist(flat, bins=200, range=(0, float(np.percentile(flat, 99.5))),
+                     color="darkorange", edgecolor="none", alpha=0.85)
+        _stats_box(axes[1], flat)
     axes[1].set_xlabel("Noise (ADU RMS)"); axes[1].set_ylabel("Pixel count")
     axes[1].set_title("Noise Distribution"); axes[1].grid(axis="y", alpha=0.3)
-    _stats_box(axes[1], flat)
 
     if cm_noise is not None:
         # cm_noise may be a dict {asic_name: array} for multi-ASIC, or a single array
@@ -232,8 +244,13 @@ def plot_bad_pixels(
     
     # Custom legend
     from matplotlib.patches import Patch
+    # Count good pixels only from active region
+    if active_mask is not None:
+        n_good = int((~bad_mask & active_mask).sum())
+    else:
+        n_good = int((~bad_mask).sum())
     legend_elements = [
-        Patch(facecolor='green', label=f'Good ({int((~bad_mask).sum())})'),
+        Patch(facecolor='green', label=f'Good ({n_good})'),
         Patch(facecolor='red', label=f'Hot (>{hot_thr:.1f} RMS) ({n_hot})'),
         Patch(facecolor='blue', label=f'Cold (<{cold_thr:.2f} RMS) ({n_cold})'),
         Patch(facecolor='purple', label=f'Non-finite ({n_nonfinite})'),
@@ -241,36 +258,40 @@ def plot_bad_pixels(
     ]
     ax.legend(handles=legend_elements, loc='upper right', fontsize=8)
     
-    # Panel 3: Noise distribution with thresholds marked
+    # Panel 3: Noise distribution with thresholds marked (apply active_mask)
     ax = axes[1, 0]
-    flat = noise_map[np.isfinite(noise_map) & (noise_map > 0)].ravel()
-    ax.hist(flat, bins=200, range=(0, float(np.percentile(flat, 99.5))),
-            color="steelblue", edgecolor="none", alpha=0.85)
+    mask_3d = np.isfinite(noise_map) & (noise_map > 0)
+    if active_mask is not None:
+        mask_3d = mask_3d & active_mask
+    flat = noise_map[mask_3d].ravel()
+    if flat.size > 0:
+        ax.hist(flat, bins=200, range=(0, float(np.percentile(flat, 99.5))),
+                color="steelblue", edgecolor="none", alpha=0.85)
     ax.axvline(med, color='green', lw=2, ls='-', label=f'Median ({med:.2f})')
     ax.axvline(hot_thr, color='red', lw=2, ls='--', label=f'Hot threshold ({hot_thr:.2f})')
     ax.axvline(cold_thr, color='blue', lw=2, ls='--', label=f'Cold threshold ({cold_thr:.3f})')
     ax.set_xlabel("Noise (ADU RMS)"); ax.set_ylabel("Pixel count")
     ax.set_title("Noise Distribution with Bad Pixel Thresholds")
     ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3)
-    
-    # Panel 4: Per-ASIC bad pixel statistics
+
+    # Panel 4: Per-ASIC bad pixel statistics (respect ASIC mask)
     ax = axes[1, 1]
     asic_width = 64
     n_asics = X // asic_width
-    
+
     asic_stats = []
     asic_labels = []
     for i in range(n_asics):
+        # Use reversed index to match ASIC naming (C7=cols 0-63, C0=cols 448-511)
+        rev = n_asics - 1 - i
+        asic_idx = rev  # numeric ASIC index
         x0, x1 = i * asic_width, (i + 1) * asic_width
         asic_bad = bad_mask[:, x0:x1].sum()
-        asic_total = x1 - x0
-        if active_mask is not None:
-            asic_active = int(active_mask[:, x0:x1].sum())
-        else:
-            asic_active = Y * asic_width   # all pixels active
         asic_stats.append(asic_bad)
-        asic_labels.append(f'ASIC{i}')
-    
+        # Use C{n} naming with color coding; grey out masked ASICs
+        label = f"C{asic_idx}"
+        asic_labels.append(label)
+
     bars = ax.bar(asic_labels, asic_stats, color='tomato', edgecolor='white')
     ax.set_xlabel("ASIC"); ax.set_ylabel("Bad Pixel Count")
     ax.set_title("Bad Pixels per ASIC")
