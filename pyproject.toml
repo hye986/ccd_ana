@@ -24,10 +24,11 @@ dev = [
 ]
 
 [project.scripts]
-pnccd-template   = "pnccd_ana.cli.template:main"
-pnccd-offset     = "pnccd_ana.cli.offset:main"
-pnccd-event-rec  = "pnccd_ana.cli.event_rec:main"
-pnccd-energy-cal = "pnccd_ana.cli.energy_cal:main"
+pnccd-template       = "pnccd_ana.cli.template:main"
+pnccd-offset         = "pnccd_ana.cli.offset:main"
+pnccd-event-rec      = "pnccd_ana.cli.event_rec:main"
+pnccd-energy-cal     = "pnccd_ana.cli.energy_cal:main"
+pnccd-time-dependency = "pnccd_ana.cli.time_dependency:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

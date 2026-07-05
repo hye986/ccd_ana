@@ -47,12 +47,13 @@ def main(argv=None):
             print("  Aborted.")
             return
 
-    out.write_text(_TEMPLATE)
+        out.write_text(_TEMPLATE)
     print(f"  Template written to: {out}")
     print(f"  Edit it, then run:")
-    print(f"    pnccd-offset      {out}")
-    print(f"    pnccd-event-rec   {out}")
-    print(f"    pnccd-energy-cal  {out}")
+    print(f"    pnccd-offset          {out}")
+    print(f"    pnccd-event-rec       {out}")
+    print(f"    pnccd-energy-cal      {out}")
+    print(f"    pnccd-time-dependency {out}")
 
 
 if __name__ == "__main__":

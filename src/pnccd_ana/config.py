@@ -124,28 +124,39 @@ _DEFAULTS: dict[str, Any] = {
         },
     },
     "energy_cal": {
-        "events_file":     None,
-        "output_file":     None,
-        "target_ev":       5898.8,      # Mn Kα
-        "roi_low":         4000.0,      # ADU  (ROOT ROIlow)
-        "roi_high":        12000.0,     # ADU  (ROOT ROIhigh)
-        "n_params_gauss":  3,           # ROOT NParamsGauss (3-5)
-        "use_ud_split":    False,       # ROOT UseUDSplit
-        "use_all_split":   False,       # ROOT UseAllSplit (enables iterations 1+2)
-        "split_even_odd":  True,        # ROOT SplitEvenOdd
-        "split_frame":     False,       # ROOT SplitFrame (bidirectional readout)
-        "full_frame":      False,       # ROOT FullFrame (frame-store CTI fitted)
-        "cte_relax":       0.5,         # ROOT relaxation factor
-        "max_cte_iter":    10,          # ROOT max inner CTE iterations
-        "save_plots":      True,
-        # Final spectrum and resolution fit
-        "fit_window_frac":  0.12,    # Kα fit window = target_ev × (1 ± frac)
-        "spectrum_with_bg": False,   # include constant background in Gaussian fit
-        "spectrum_e_min":   None,    # energy axis lower bound [eV] (None = auto)
-        "spectrum_e_max":   None,    # energy axis upper bound [eV] (None = auto)
-        "spectrum_n_bins":  400,     # histogram bins for final spectrum
-    },
-}
+            "events_file":     None,
+            "output_file":     None,
+            "target_ev":       5898.8,      # Mn Kα
+            "roi_low":         4000.0,      # ADU  (ROOT ROIlow)
+            "roi_high":        12000.0,     # ADU  (ROOT ROIhigh)
+            "n_params_gauss":  3,           # ROOT NParamsGauss (3-5)
+            "use_ud_split":    False,       # ROOT UseUDSplit
+            "use_all_split":   False,       # ROOT UseAllSplit (enables iterations 1+2)
+            "split_even_odd":  True,        # ROOT SplitEvenOdd
+            "split_frame":     False,       # ROOT SplitFrame (bidirectional readout)
+            "full_frame":      False,       # ROOT FullFrame (frame-store CTI fitted)
+            "cte_relax":       0.5,         # ROOT relaxation factor
+            "max_cte_iter":    10,          # ROOT max inner CTE iterations
+            "save_plots":      True,
+            # Final spectrum and resolution fit
+            "fit_window_frac":  0.12,    # Kα fit window = target_ev × (1 ± frac)
+            "spectrum_with_bg": False,   # include constant background in Gaussian fit
+            "spectrum_e_min":   None,    # energy axis lower bound [eV] (None = auto)
+            "spectrum_e_max":   None,    # energy axis upper bound [eV] (None = auto)
+            "spectrum_n_bins":  400,     # histogram bins for final spectrum
+        },
+        "time_dependency": {
+            "events_file":         None,   # null = {output_dir}/events.h5
+            "gain_file":           None,   # null = {output_dir}/energy_cal.h5
+            "skip_frames":         0,      # skip N frames at start
+            "max_frames":          None,   # null = all frames
+            "n_bins":              50,     # number of time bins
+            "min_events_per_bin":  100,    # minimum events required per bin
+            "drift_threshold":     0.01,   # relative gain change considered significant (1%)
+            "save_results":        True,   # save results to HDF5
+            "save_plots":          True,   # generate diagnostic plots
+        },
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -442,6 +453,17 @@ energy_cal:
   spectrum_e_min: null              # energy axis lower bound [eV] (null = auto)
   spectrum_e_max: null              # energy axis upper bound [eV] (null = auto)
   spectrum_n_bins: 400              # histogram bins for final spectrum plots
+
+time_dependency:
+  events_file: null                 # null = {output_dir}/events.h5
+  gain_file: null                   # null = {output_dir}/energy_cal.h5
+  skip_frames: 0                    # skip N frames at start
+  max_frames: null                  # null = all frames
+  n_bins: 50                        # number of time bins for analysis
+  min_events_per_bin: 100           # minimum events required per time bin
+  drift_threshold: 0.01             # relative gain change considered significant (1%)
+  save_results: true                # save results to HDF5
+  save_plots: true                  # generate diagnostic plots
 """
 
 

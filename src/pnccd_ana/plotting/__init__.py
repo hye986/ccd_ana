@@ -1,4 +1,4 @@
-"""plotting sub-package – visualization utilities."""
+w"""plotting sub-package – visualization utilities."""
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 from .common import _cb, _stats_box, _adjust_bin_range, save_figure
@@ -23,3 +23,13 @@ from .cti_plots     import (plot_cte_map,
                              plot_cti_summary,
                              plot_signal_vs_row)
 from .spectrum_plots import plot_final_spectrum
+
+# ── Stage 4: time dependency analysis ───────────────────────────────────────────
+from .time_dependency_plots import (
+    plot_gain_vs_time,
+    plot_event_rate_vs_time,
+    plot_noise_vs_time,
+    plot_offset_vs_time,
+    plot_time_dependency_summary,
+    plot_all_time_dependency,
+)
