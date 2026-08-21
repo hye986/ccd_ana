@@ -44,17 +44,17 @@ class TimeDependencyResult:
     gain_std_vs_time: np.ndarray    # (n_bins,) std gain per bin
     gain_n_events_vs_time: np.ndarray  # (n_bins,) events per bin
     
+    # Event rate
+    event_rate_vs_time: np.ndarray   # (n_bins,) events per frame
+
     # Noise vs time (if frames available)
     noise_vs_time: np.ndarray | None = None
     noise_std_vs_time: np.ndarray | None = None
-    
+
     # Offset vs time (if frames available)
     offset_vs_time: np.ndarray | None = None
     offset_std_vs_time: np.ndarray | None = None
-    
-    # Event rate
-    event_rate_vs_time: np.ndarray   # (n_bins,) events per frame
-    
+
     # Quality metrics
     gain_drift_rate: float = 0.0     # ADU per frame
     gain_stability_score: float = 1.0  # 1.0 = stable, <1.0 = drifting

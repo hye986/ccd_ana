@@ -1,4 +1,4 @@
-w"""plotting sub-package – visualization utilities."""
+"""plotting sub-package – visualization utilities."""
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 from .common import _cb, _stats_box, _adjust_bin_range, save_figure
