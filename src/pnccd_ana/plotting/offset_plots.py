@@ -14,7 +14,6 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 
-from ..io.geometry import ASIC_COLORS, ASIC_NAMES, ASIC_MASK, ADC_MAX
 from .common import _cb, _stats_box
 
 

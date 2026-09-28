@@ -16,7 +16,7 @@ Raw dark frames  →  [pnccd-offset]  →  offset / noise / CM / bad-pixel .npy
 
 | Stage | CLI command | Input | Output |
 |-------|-------------|-------|--------|
-| Offset calibration | `pnccd-offset` | dark frames (RAW / HDF5) | `.npy` calibration arrays |
+| Offset calibration | `pnccd-offset` | dark frames (RAW, 512×512) | `.npy` calibration arrays |
 
 ---
 
@@ -37,7 +37,6 @@ python -m pnccd_ana.cli.offset --help
 | Package | Purpose |
 |---------|---------|
 | `numpy` | Array operations |
-| `h5py` | HDF5 input file I/O |
 | `matplotlib` | Diagnostic plots |
 | `pyyaml` | Configuration file parsing |
 
@@ -58,9 +57,6 @@ parameters:
 general:
   output_dir: output
   data_dir: /path/to/your/data
-  data_format: raw       # raw | h5
-  frame_rows: 1024       # sensor height in pixels
-  frame_cols: 512        # sensor width in pixels
   ASIC_num: 8            # number of ASICs horizontally
 
 offset:
@@ -84,9 +80,10 @@ All outputs go to `output_dir` defined in the config.
 ### Sensor geometry
 
 ```
-pnCCD sensor:  1024 (Y) × 512 (X) pixels
+pnCCD sensor:  512 (Y) × 512 (X) pixels — single hybrid
 Rolling shutter:  Y = 0 at bottom (readout side), reads upward
-8 ASICs:  each reads 64 columns  (X = 0..63, 64..127, ..., 448..511)
+ASICs:  each reads an equal band of columns (512 / ASIC_num)
+        e.g. with ASIC_num=8:  C7 = X[0:64], C6 = X[64:128], ..., C0 = X[448:512]
 
 Array layout:  data[Y, X]
   Y = row index  (axis 0, vertical)
@@ -98,13 +95,13 @@ Array layout:  data[Y, X]
 ```
 [8-byte header: b'16BU0000']
 For each frame:
-  [0xFFFF marker (2B)] [ADC counter (4B)] [W × uint16 pixels]  ← first row
-  [0xFFFE marker (2B)] [ADC counter (4B)] [W × uint16 pixels]  ← rows 2..H
+  [0xFFFF marker (2B)] [ADC counter (4B)] [512 × uint16 pixels]  ← first row
+  [0xFFFE marker (2B)] [ADC counter (4B)] [512 × uint16 pixels]  ← rows 2..512
   ...
 ```
 
-Frame geometry (H × W) is auto-detected from the marker pattern.
-Pass `frame_rows` and `frame_cols` in config for non-standard sizes.
+A frame is 512 row records. The geometry is fixed; a trailing partial
+frame (fewer than 512 rows) is ignored.
 
 ---
 
@@ -220,9 +217,7 @@ Key parameters:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `general.data_format` | raw | Input format: `raw` or `h5` |
-| `general.frame_rows` | auto | Sensor height in pixels (Y) |
-| `general.frame_cols` | auto | Sensor width in pixels (X) |
+| `general.n_workers` | 8 | Parallel frame-loading workers |
 | `general.ASIC_num` | 8 | ASICs horizontally |
 | `general.ASIC_mask` | [] | ASIC indices to exclude |
 | `offset.pedestal_method` | both | `median` / `sigclip` / `both` |
@@ -243,8 +238,8 @@ pnccd_ana/
 │   └── noise.py                 Noise + bad pixel mask
 ├── io/
 │   ├── geometry.py              ASIC layout
-│   ├── hdf5.py                  HDF5 reading + .npy save / load
-│   └── raw.py                   RAW file reader (memory-mapped)
+│   ├── raw.py                   RAW reader (512×512, memory-mapped)
+│   └── calibration.py           .npy calibration save / load
 ├── plotting/
 │   ├── common.py                Shared helpers
 │   └── offset_plots.py          Offset calibration plots

@@ -175,14 +175,7 @@ def run(cfg: Config) -> dict:
         print(f"    {p}")
 
     # ── Load dark frames ──────────────────────────────────────────────────────
-    from ..io.raw import get_io_module as _raw_io
-    io = _raw_io(gen.get("data_format", "raw"))
-
-    raw_kwargs = {}
-    if gen.get("frame_rows"):
-        raw_kwargs["height"] = gen["frame_rows"]
-    if gen.get("frame_cols"):
-        raw_kwargs["width"] = gen["frame_cols"]
+    from ..io import raw as _raw
 
     def _passthrough(raw: np.ndarray, _idx: np.ndarray) -> np.ndarray:
         return raw
@@ -203,21 +196,16 @@ def run(cfg: Config) -> dict:
             break
         print(f"\n  Loading: {fpath}")
         request_max = remaining if remaining is None else remaining + (stage_skip if is_first_file else 0)
-        indices = io.get_frame_indices(fpath,
-                                       complete_only=gen["complete_only"],
-                                       max_frames=request_max,
-                                       **raw_kwargs)
+        indices = _raw.get_frame_indices(fpath, max_frames=request_max)
         if is_first_file and stage_skip > 0:
-            from ..io.raw import _apply_frame_selection
-            indices = _apply_frame_selection(indices,
-                                             skip_frames=stage_skip,
-                                             max_frames=remaining)
+            indices = _raw._apply_frame_selection(indices,
+                                                  skip_frames=stage_skip,
+                                                  max_frames=remaining)
         is_first_file = False
-        chunks = io.process_frames_mt(fpath, indices, _passthrough,
-                                      chunk_size=gen["chunk_size"],
-                                      n_workers=gen["n_workers"],
-                                      desc="dark frames",
-                                      **raw_kwargs)
+        chunks = _raw.process_frames_mt(fpath, indices, _passthrough,
+                                        chunk_size=gen["chunk_size"],
+                                        n_workers=gen["n_workers"],
+                                        desc="dark frames")
         all_chunks.extend(chunks)
         if remaining is not None:
             remaining -= len(indices)
