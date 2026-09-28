@@ -47,7 +47,7 @@ def main(argv=None):
             print("  Aborted.")
             return
 
-        out.write_text(_TEMPLATE)
+    out.write_text(_TEMPLATE)
     print(f"  Template written to: {out}")
     print(f"  Edit it, then run:")
     print(f"    pnccd-offset          {out}")
