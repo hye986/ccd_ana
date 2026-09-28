@@ -28,28 +28,11 @@ Config file format (YAML)
     compare_pedestal_methods: true
     split_even_odd: true         # separate even/odd column CM medians per ASIC
     save_npy: true
-    save_h5: true
-
-  event_rec:
-    source_run_file: source_run.raw  # relative to data_dir
-    calibration_file: offset.h5      # relative to data_dir
-    seed_sigma: 5.0
-    split_sigma: 3.0
-    split_even_odd: true             # separate even/odd column CM medians per ASIC
-    noise_scope: auto
-    reject_extra: false
-    adu_min: 0.0
-    adu_max: 10000.0
-    n_bins: 1000
-    save_events: events.h5
-    prefer_offset: sigclip
 
 Path resolution:
-  - Input paths (dark_run_file, source_run_file, calibration_file) are resolved
-    relative to data_dir if not absolute
-  - Output paths (save_events) are resolved relative to output_dir
-  - calibration_file defaults to {output_dir}/offset.h5 if not set
-  - save_events defaults to {output_dir}/events.h5 if not set
+  - Input paths (dark_run_file) are resolved relative to data_dir if not absolute
+  - Output .npy files (offset, noise, CM noise, bad pixel mask) are written
+    to output_dir
 """
 
 from __future__ import annotations
@@ -92,71 +75,21 @@ _DEFAULTS: dict[str, Any] = {
         "skip_frames":              0,
         "max_frames":               None,
         "save_npy":                 True,
-        "save_h5":                  True,
+        "save_plots":               True,
         # ROOT Analysis.OffNoiMapHLL.SplitEvenOdd 1
         # Compute separate CM medians for even- and odd-indexed columns
         # within each ASIC segment.  Corrects alternating-channel correlated
         # noise seen in pnCCDs.  Matches ROOT HCommonModeMedianEvenOdd.
         "split_even_odd":           True,
-    },
-    "event_rec": {
-        "source_run_file":    None,
-        "calibration_file":   None,
-        "skip_frames":        0,
-        "max_frames":         None,
-        "seed_sigma":         5.0,
-        "split_sigma":        3.0,
-        "noise_scope":        "auto",
-        "reject_extra":       False,
-        "max_cluster_size":   0,
-        "adu_min":            0.0,
-        "adu_max":            10000.0,
-        "n_bins":             1000,
-        "save_events":        None,
-        "prefer_offset":      "sigclip",
-        "split_even_odd":     True,
+        # Bad-pixel mask thresholds (used when saving the mask + plots)
         "bad_pixel_mask": {
             "enabled":           True,
             "hot_rms_multiple":  5.0,
             "cold_rms_fraction": 0.1,
             "max_clip_fraction": 0.5,
-            "n_dark_frames":     0,
         },
     },
-    "energy_cal": {
-            "events_file":     None,
-            "output_file":     None,
-            "target_ev":       5898.8,      # Mn Kα
-            "roi_low":         4000.0,      # ADU  (ROOT ROIlow)
-            "roi_high":        12000.0,     # ADU  (ROOT ROIhigh)
-            "n_params_gauss":  3,           # ROOT NParamsGauss (3-5)
-            "use_ud_split":    False,       # ROOT UseUDSplit
-            "use_all_split":   False,       # ROOT UseAllSplit (enables iterations 1+2)
-            "split_even_odd":  True,        # ROOT SplitEvenOdd
-            "split_frame":     False,       # ROOT SplitFrame (bidirectional readout)
-            "full_frame":      False,       # ROOT FullFrame (frame-store CTI fitted)
-            "cte_relax":       0.5,         # ROOT relaxation factor
-            "max_cte_iter":    10,          # ROOT max inner CTE iterations
-            "save_plots":      True,
-            # Final spectrum and resolution fit
-            "fit_window_frac":  0.12,    # Kα fit window = target_ev × (1 ± frac)
-            "spectrum_with_bg": False,   # include constant background in Gaussian fit
-            "spectrum_e_min":   None,    # energy axis lower bound [eV] (None = auto)
-            "spectrum_e_max":   None,    # energy axis upper bound [eV] (None = auto)
-            "spectrum_n_bins":  400,     # histogram bins for final spectrum
-        },
-        "time_dependency": {
-            "events_file":         None,   # null = {output_dir}/events.h5
-            "gain_file":           None,   # null = {output_dir}/energy_cal.h5
-            "skip_frames":         0,      # skip N frames at start
-            "max_frames":          None,   # null = all frames
-            "n_bins":              50,     # number of time bins
-            "min_events_per_bin":  100,    # minimum events required per bin
-            "drift_threshold":     0.01,   # relative gain change considered significant (1%)
-            "save_results":        True,   # save results to HDF5
-            "save_plots":          True,   # generate diagnostic plots
-        },
-    }
+}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -229,20 +162,8 @@ class Config:
         return self.output_dir / p
 
     def calibration_path(self) -> Path:
-        """Default path for offset calibration file."""
-        return self.output_dir / "offset.h5"
-
-    def events_path(self) -> Path:
-        """Default path for events file."""
-        return self.output_dir / "events.h5" 
-
-    def asics_for(self, section: str) -> list[str] | None:
-        """Return resolved ASIC list for *section*."""
-        from .io.geometry import resolve_asics
-        raw = self.general.get("asics", None)
-        if isinstance(raw, str):
-            raw = raw.split()
-        return resolve_asics(raw)
+        """Default output directory for offset calibration .npy products."""
+        return self.output_dir
 
     def methods_for_offset(self) -> list[str]:
         """Parse pedestal_method into ['median'], ['sigclip'], or both."""
@@ -330,140 +251,17 @@ offset:
   compare_pedestal_methods: true
   skip_frames: 0                    # skip N frames at start (warm-up / shutter transient)
   max_frames: null                  # overrides general.max_frames for this stage
-  save_npy: true
-  save_h5: true
+  save_npy: true                    # write offset/noise/CM/bad-pixel .npy files
+  save_plots: true                  # generate diagnostic plots
   split_even_odd: true              # separate CM medians for even/odd columns per ASIC
                                     # matches ROOT Analysis.OffNoiMapHLL.SplitEvenOdd 1
                                     # corrects alternating-channel correlated noise in pnCCDs
                                     # set false for standard single-median CM correction
-
-event_rec:
-  source_run_file: source_run.raw   # relative to data_dir
-  calibration_file: offset.h5       # relative to data_dir (or output_dir if not found)
-  skip_frames: 0
-  max_frames: null
-  seed_sigma: 5.0                   # primary threshold — ROOT Analysis.Filter.ThresPrm 5 noise
-  split_sigma: 3.0                  # secondary threshold — ROOT Analysis.Filter.ThresSec 3 noise
-  max_cluster_size: 9               # reject clusters larger than this many pixels
-                                    # singles=1 .. quads=4, generous limit=9
-                                    # larger clusters are cosmic rays / particle tracks
-                                    # set 0 to disable
-  split_even_odd: true              # separate CM medians for even/odd columns per ASIC
-                                    # matches ROOT Analysis.Filter.SplitEvenOdd 1
-                                    # MUST match the value used in the offset stage
-  noise_scope: auto
-  adu_min: 0.0                      # lower bound for spectra histograms [ADU]
-  adu_max: 10000.0                  # upper bound for spectra histograms [ADU]
-                                    # NOTE: these are only for the output spectra/hit maps,
-                                    # NOT for event acceptance — all events above split_sigma
-                                    # are kept regardless of adu_min/adu_max
-  n_bins: 1000                      # histogram bins for spectra
-  save_events: events.h5            # relative to output_dir (null to skip)
-  prefer_offset: sigclip            # sigclip | median
   bad_pixel_mask:
     enabled: true
     hot_rms_multiple: 5.0           # noise > N × median(active noise) → HOT
     cold_rms_fraction: 0.1          # noise < N × median(active noise) → COLD/stuck
     max_clip_fraction: 0.5          # clip rate above this → UNSTABLE
-    n_dark_frames: 0                # 0 disables clip-fraction test
-
-energy_cal:
-  events_file: null                 # null = {output_dir}/events.h5
-  output_file: null                 # null = {output_dir}/energy_cal.h5
-
-  # ── Calibration line ───────────────────────────────────────────────────────
-  target_ev: 5898.8                 # Mn Kα reference energy [eV]
-                                    # Mn Kβ = 6490.4 eV (not used by default)
-
-  # ── ADU region of interest ─────────────────────────────────────────────────
-  # Set these by inspecting the single-pixel peak in the event_rec spectrum.
-  # Rule of thumb: set roi_low  ~  0.5 × expected_peak_adu
-  #                set roi_high ~  1.5 × expected_peak_adu
-  # Example for Fe55 at ~7 ADU/eV: peak ≈ 41000 ADU → roi [20000, 62000]
-  # Example for Fe55 at ~0.3 ADU/eV: peak ≈ 1800 ADU → roi [900, 2700]
-  roi_low: 4000.0                   # ROOT Analysis.Calib.ROIlow  [ADU]
-  roi_high: 12000.0                 # ROOT Analysis.Calib.ROIhigh [ADU]
-
-  # ── Gaussian peak fitting ──────────────────────────────────────────────────
-  n_params_gauss: 3                 # ROOT Analysis.Calib.NParamsGauss
-                                    # 3 = pure Gaussian (amplitude, mean, sigma)
-                                    # 4 = Gaussian + constant background
-                                    # 5 = Gaussian + linear background
-
-  # ── Event selection ────────────────────────────────────────────────────────
-  use_ud_split: false               # ROOT Analysis.Calib.UseUDSplit
-                                    # include same-column 2-pixel splits in iteration 0
-                                    # useful when single statistics are low
-
-  use_all_split: false              # ROOT Analysis.Calib.UseAllSplit
-                                    # enable iterations 1+2 using all cluster sizes
-                                    # requires gain_map from iteration 0 as starting point
-                                    # set true for best statistics / final calibration
-
-  # ── Column and row splitting ───────────────────────────────────────────────
-  split_even_odd: true              # ROOT Analysis.Calib.SplitEvenOdd
-                                    # separate global peak fallback for even/odd columns
-                                    # corrects systematic gain difference between
-                                    # alternating readout channels
-                                    # MUST match event_rec.split_even_odd
-
-  split_frame: false                # ROOT Analysis.Calib.SplitFrame
-                                    # true  = sensor has two readout directions
-                                    #         (top half reads downward from row N-1,
-                                    #          bottom half reads upward from row 0)
-                                    # false = single readout direction (frame-store mode)
-                                    # For pnCCD single hybrid: typically false
-
-  full_frame: false                 # ROOT Analysis.Calib.FullFrame
-                                    # true  = frame-store CTE also fitted (CTEfs)
-                                    # false = frame-store CTE fixed to 1.0 (CTEfs = 1)
-                                    # Only relevant when split_frame: true or sensor
-                                    # has a physical frame-store region
-
-  # ── CTE fit parameters ─────────────────────────────────────────────────────
-  cte_relax: 0.5                    # ROOT relaxation factor for CTE update
-                                    # CTE_new = CTE_old × fitted_CTE^relax
-                                    # range 0.3–0.7; lower = more stable, slower
-                                    # 0.5 matches ROOT default
-
-  max_cte_iter: 10                  # ROOT maximum inner CTE sub-iterations per column
-                                    # fit stops early if convergence criteria met:
-                                    #   peak position change < 1%
-                                    #   |CTE - 1| < 5e-6 for all CTE parameters
-
-  # ── Output ─────────────────────────────────────────────────────────────────
-  save_plots: true                  # generate diagnostic plots:
-                                    #   gain_map.png        — 2D gain [eV/ADU]
-                                    #   gain_histogram.png  — gain distribution
-                                    #   column_peaks.png    — per-column peak positions
-                                    #   cte_map.png         — 2D cumulative CTE
-                                    #   cti_summary.png     — CTI per column + histogram
-                                    #   signal_vs_row.png   — CTI effect visualisation
-                                    #   cal_spectrum_by_grade.png         — spectrum by grade
-                                    #   cal_spectrum_resolution_all_grades.png  — Kα fit (all grades)
-                                    #   cal_spectrum_resolution_grades_[0].png — Kα fit (singles only)
-
-  # ── Final spectrum and resolution fit ──────────────────────────────────────
-  fit_window_frac: 0.12            # Mn Kα fit window: target_ev × (1 ± frac)
-                                    # 0.12 = ±12% around 5898 eV = [5190, 6606] eV
-                                    # tighten if Kβ leaks into the window
-  spectrum_with_bg: false           # add constant background term to Gaussian fit
-                                    # use true if there is a significant continuum
-                                    # under the Kα peak
-  spectrum_e_min: null              # energy axis lower bound [eV] (null = auto)
-  spectrum_e_max: null              # energy axis upper bound [eV] (null = auto)
-  spectrum_n_bins: 400              # histogram bins for final spectrum plots
-
-time_dependency:
-  events_file: null                 # null = {output_dir}/events.h5
-  gain_file: null                   # null = {output_dir}/energy_cal.h5
-  skip_frames: 0                    # skip N frames at start
-  max_frames: null                  # null = all frames
-  n_bins: 50                        # number of time bins for analysis
-  min_events_per_bin: 100           # minimum events required per time bin
-  drift_threshold: 0.01             # relative gain change considered significant (1%)
-  save_results: true                # save results to HDF5
-  save_plots: true                  # generate diagnostic plots
 """
 
 

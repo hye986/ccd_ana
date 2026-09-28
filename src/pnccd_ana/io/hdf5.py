@@ -194,930 +194,138 @@ def process_frames_mt(
     return results
 
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Calibration HDF5 save / load
+# Calibration .npy save / load (Stage 1: offset calibration)
 # ──────────────────────────────────────────────────────────────────────────────
 
-
-def _write_cal_group(grp: h5py.Group, r: dict) -> None:
-    """Write calibration arrays into an open HDF5 group."""
-    og = grp.require_group("offset")
-    ng = grp.require_group("noise")
-    for key, dset_name, parent in [
-        ("offset_median",  "median",              og),
-        ("offset_sigclip", "sigmaclip",           og),
-        ("noise",          "pixel_rms",           ng),
-        ("n_clipped_map",  "n_clipped_per_pixel", ng),
-    ]:
-        if key in r:
-            parent.create_dataset(dset_name, data=r[key], compression="gzip")
-
-    # CM noise: either a 1-D array (legacy) or a dict of per-ASIC arrays
-    if "cm_noise" in r:
-        cm = r["cm_noise"]
-        if isinstance(cm, dict):
-            # Per-ASIC: save each ASIC as noise/cm_rms_<NAME>
-            for asic_name, arr in cm.items():
-                ng.create_dataset(f"cm_rms_{asic_name}", data=arr,
-                                  compression="gzip")
-        else:
-            # Legacy 1-D array
-            ng.create_dataset("cm_rms", data=cm, compression="gzip")
-
-
-def save_calibration_h5(
-        out_path: str | Path,
-        results:  dict,
-        n_sigma:  float,
-        n_frames: int,
-        methods:  list[str],
-        metadata: dict | None = None,
+def save_calibration_npy(
+        out_dir:         str | Path,
+        results:         dict,
+        cm_map:          np.ndarray | None = None,
+        bad_pixel_mask:  np.ndarray | None = None,
 ) -> None:
     """
-    Save dark-frame calibration products to HDF5.
+    Save offset-calibration arrays as .npy files.
 
-    File structure::
+    Files written to *out_dir*::
 
-        /global/offset/median
-        /global/offset/sigmaclip
-        /global/noise/pixel_rms
-        /global/noise/cm_rms
-        /global/noise/n_clipped_per_pixel
-        /asics/<NAME>/offset/...
-        /asics/<NAME>/noise/...
-        /meta/<key>          ← arbitrary metadata scalars/strings
+        offset_median.npy        (H, W) float32   — median offset
+        offset_sigclip.npy       (H, W) float32   — sigma-clip offset
+        noise.npy                (H, W) float32   — per-pixel RMS
+        n_clipped_map.npy        (H, W) float32   — frames clipped per pixel
+        cm_map.npy               (n_frames, H, n_asics) float32 — CM correction
+        cm_noise_<ASIC>.npy      (H,) float32     — per-ASIC CM noise
+        bad_pixel_mask.npy       (H, W) bool      — True = bad pixel
 
     Parameters
     ----------
-    out_path : output .h5 file path
-    results  : dict with keys "global" and optionally "asics"
-    n_sigma  : sigma-clip threshold used
-    n_frames : number of dark frames processed
-    methods  : list of methods used, e.g. ["median", "sigclip"]
-    metadata : optional dict of extra key→value pairs stored under /meta
+    out_dir        : output directory
+    results        : results dict ("global" → per-pixel maps)
+    cm_map         : (n_frames, H, n_asics) CM correction values, or None
+    bad_pixel_mask : (H, W) bool bad pixel mask, or None
     """
-    print(f"\nSaving calibration HDF5: {out_path}")
-    with h5py.File(out_path, "w") as f:
-        f.attrs["description"]       = "pnCCD dark-frame calibration"
-        f.attrs["n_dark_frames"]     = n_frames
-        f.attrs["sigma_clip_nsigma"] = n_sigma
-        f.attrs["methods"]           = ",".join(methods)
-
-        if "global" in results:
-            _write_cal_group(f.require_group("global"), results["global"])
-        if "asics" in results:
-            ag = f.require_group("asics")
-            for aname, adata in results["asics"].items():
-                _write_cal_group(ag.require_group(aname), adata)
-
-        if metadata:
-            mg = f.require_group("meta")
-            for k, v in metadata.items():
-                mg.attrs[k] = v
-
-    print("  ✓ saved.")
-
-
-def load_calibration_h5(
-        h5_path:   str | Path,
-        asics:     list[str] | None = None,
-        prefer:    str = "sigclip",   # "sigclip" or "median"
-) -> dict[str, dict[str, np.ndarray]]:
-    """
-    Load calibration maps from an offset.h5 file.
-
-    Parameters
-    ----------
-    h5_path : calibration HDF5 file produced by save_calibration_h5
-    asics   : ASIC names to load individually (None → global only)
-    prefer  : which offset to load as the primary "offset" key
-
-    Returns
-    -------
-    cal["global"]["offset"]  float32 (1024,1024)
-    cal["global"]["noise"]   float32 (1024,1024)
-    cal["H0"]["offset"]      float32 (512,512)   — if requested
-    ...
-    """
-    # Map user-facing names to the HDF5 dataset names used by save_calibration_h5
-    _H5_NAME = {"sigclip": "sigmaclip", "median": "median"}
-    prefer_h5 = _H5_NAME.get(prefer, prefer)
-    alt        = "median" if prefer == "sigclip" else "sigclip"
-    alt_h5     = _H5_NAME.get(alt, alt)
-    cal: dict[str, dict] = {}
-
-    with h5py.File(h5_path, "r") as f:
-
-        def _list_offsets(grp_path: str) -> list[str]:
-            grp = f.get(grp_path)
-            if grp is None:
-                return []
-            og = grp.get("offset")
-            return list(og.keys()) if og is not None else []
-
-        available_global = _list_offsets("global")
-        if available_global:
-            print(f"  Available offsets in file (global): {available_global}")
-
-        def _load(grp_path: str, name: str) -> dict | None:
-            grp = f.get(grp_path)
-            if grp is None:
-                return None
-            d: dict = {}
-            offset_found = False
-
-            # Try preferred h5 name, then alternative, then any available
-            for h5key, label in [(prefer_h5, prefer), (alt_h5, alt)]:
-                dset = grp.get(f"offset/{h5key}")
-                if dset is not None:
-                    d["offset"]      = dset[:].astype(np.float32)
-                    d["offset_type"] = label   # store as user-facing name
-                    offset_found = True
-                    break
-
-            if not offset_found:
-                og = grp.get("offset")
-                if og is not None:
-                    for k in og.keys():
-                        d["offset"]      = og[k][:].astype(np.float32)
-                        d["offset_type"] = k
-                        offset_found = True
-                        print(f"  Warning: [{name}] neither '{prefer}' nor '{alt}' found; "
-                              f"falling back to 'offset/{k}'")
-                        break
-
-            if not offset_found:
-                print(f"  ✗  [{name}] no offset dataset found under '{grp_path}/offset'")
-                return None
-
-            # Noise: required
-            ng = grp.get("noise")
-            if ng is None or ng.get("pixel_rms") is None:
-                print(f"  ✗  [{name}] noise/pixel_rms not found in '{grp_path}'")
-                return None
-            d["noise"] = ng["pixel_rms"][:].astype(np.float32)
-
-            # Optional extras
-            # n_clipped_map: single dataset
-            dset = grp.get("noise/n_clipped_per_pixel")
-            if dset is not None:
-                d["n_clipped_map"] = dset[:].astype(np.float32)
-
-            # CM noise: may be legacy 1-D array or per-ASIC datasets
-            ng = grp.get("noise")
-            if ng is not None:
-                # Check for per-ASIC cm_rms_<NAME> datasets first
-                asic_cm = {k[7:]: ng[k][:].astype(np.float32)
-                           for k in ng.keys() if k.startswith("cm_rms_")}
-                if asic_cm:
-                    d["cm_noise"] = asic_cm          # dict of per-ASIC arrays
-                elif "cm_rms" in ng:
-                    d["cm_noise"] = ng["cm_rms"][:].astype(np.float32)  # legacy
-
-            return d
-
-        g = _load("global", "global")
-        if g:
-            cal["global"] = g
-            print(f"  global  offset({g['offset_type']}) {g['offset'].shape}  "
-                  f"noise {g['noise'].shape}")
-        else:
-            print("  Warning: global calibration not loaded — check HDF5 structure")
-
-        for aname in (asics or []):
-            g = _load(f"asics/{aname}", aname)
-            if g:
-                cal[aname] = g
-                print(f"  {aname}  offset({g['offset_type']}) {g['offset'].shape}  "
-                      f"noise {g['noise'].shape}")
-            else:
-                print(f"  Warning: {aname} calibration not loaded")
-
-    if not cal:
-        raise RuntimeError(
-            f"No calibration data could be loaded from {h5_path}.\n"
-            f"Run dark_frame_ana first, or check that the HDF5 file contains "
-            f"'global/offset/median' or 'global/offset/sigmaclip'.")
-
-    return cal
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Event HDF5 save / load
-# ──────────────────────────────────────────────────────────────────────────────
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Cluster / Event HDF5 save & load  (replaces old EVENT_DTYPE-based versions)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def save_events_h5(
-        out_path:     str | Path,
-        cluster_data: dict,
-        spectra:      dict[int, np.ndarray],
-        bin_edges:    np.ndarray,
-        hit_count:    np.ndarray,
-        mean_adu:     np.ndarray,
-        metadata:     dict | None = None,
-) -> None:
-    """
-    Save source-analysis results (CSR cluster data) to HDF5.
-
-    Structure::
-
-        /clusters/pixel_Y        int16  (n_pixels_total,)
-        /clusters/pixel_X        int16  (n_pixels_total,)
-        /clusters/pixel_adu      float32(n_pixels_total,)
-        /clusters/offsets        int64  (n_events+1,)
-        /clusters/flag           uint8  (n_events,)
-        /spectra/npix<N>         histogram counts per cluster size
-        /spectra/bin_edges
-        /maps/hit_count
-        /maps/mean_adu
-        /meta/<key>
-    """
-    print(f"\nSaving events HDF5: {out_path}")
-    with h5py.File(out_path, "w") as f:
-        cg = f.require_group("clusters")
-        for key in ("pixel_Y", "pixel_X", "pixel_adu", "offsets", "flag"):
-            cg.create_dataset(key, data=cluster_data[key], compression="gzip")
-
-        sg = f.require_group("spectra")
-        sg.create_dataset("bin_edges", data=bin_edges)
-        for n, counts in spectra.items():
-            sg.create_dataset(f"npix{n:02d}", data=counts, compression="gzip")
-
-        mg = f.require_group("maps")
-        mg.create_dataset("hit_count", data=hit_count, compression="gzip")
-        mg.create_dataset("mean_adu",  data=mean_adu,  compression="gzip")
-
-        if metadata:
-            mm = f.require_group("meta")
-            for k, v in metadata.items():
-                mm.attrs[k] = v
-
-    n_events = len(cluster_data["offsets"]) - 1
-    n_pixels = len(cluster_data["pixel_Y"])
-    print(f"  ✓ saved  {n_events:,} events  {n_pixels:,} pixels total")
-
-
-def load_events_h5(h5_path: str | Path) -> dict:
-    """
-    Load source-analysis results from HDF5.
-
-    Returns
-    -------
-    dict with keys:
-        cluster_data : dict (pixel_Y, pixel_X, pixel_adu, offsets, flag)
-        spectra      : dict[int, np.ndarray]  key = n_pixels
-        bin_edges    : np.ndarray
-        hit_count    : np.ndarray
-        mean_adu     : np.ndarray
-        meta         : dict
-    """
-    out: dict = {}
-    with h5py.File(h5_path, "r") as f:
-        cg = f["clusters"]
-        out["cluster_data"] = {
-            "pixel_Y":   cg["pixel_Y"][:],
-            "pixel_X":   cg["pixel_X"][:],
-            "pixel_adu": cg["pixel_adu"][:],
-            "offsets":   cg["offsets"][:],
-            "flag":      cg["flag"][:],
-        }
-
-        sg = f["spectra"]
-        out["bin_edges"] = sg["bin_edges"][:]
-        out["spectra"]   = {}
-        for key in sg:
-            if key.startswith("npix"):
-                n = int(key[4:])
-                out["spectra"][n] = sg[key][:]
-
-        mg = f["maps"]
-        out["hit_count"] = mg["hit_count"][:]
-        out["mean_adu"]  = mg["mean_adu"][:]
-
-        meta = f.get("meta")
-        out["meta"] = dict(meta.attrs) if meta is not None else {}
-
-    n_events = len(out["cluster_data"]["offsets"]) - 1
-    print(f"  Loaded {n_events:,} events from {h5_path}")
-    return out
-
-# ──────────────────────────────────────────────────────────────────────────────
-# .npy save / load
-# ──────────────────────────────────────────────────────────────────────────────
-
-def save_calibration_npy(out_dir: str | Path, results: dict) -> None:
-    """Save calibration arrays as <scope>_<quantity>.npy files."""
     out_dir = Path(out_dir)
-    mapping = {
-        "offset_median":  "offset_median",
-        "offset_sigclip": "offset_sigclip",
-        "noise":          "noise",
-        "cm_noise":       "cm_noise",
-        "n_clipped_map":  "n_clipped_map",
-    }
+    out_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nSaving .npy calibration to {out_dir}/")
 
-    def _save(scope: str, r: dict) -> None:
-        for key, suffix in mapping.items():
-            if key in r:
-                p = out_dir / f"{scope}_{suffix}.npy"
-                np.save(p, r[key])
-                print(f"  → {p.name}")
+    r = results.get("global", results)
+    mapping = {
+        "offset_median":  "offset_median.npy",
+        "offset_sigclip": "offset_sigclip.npy",
+        "noise":          "noise.npy",
+        "n_clipped_map":  "n_clipped_map.npy",
+    }
+    for key, fname in mapping.items():
+        if key in r and r[key] is not None:
+            np.save(out_dir / fname, np.asarray(r[key], dtype=np.float32))
+            print(f"  → {fname}")
 
-    if "global" in results:
-        _save("global", results["global"])
-    if "asics" in results:
-        for aname, adata in results["asics"].items():
-            _save(aname, adata)
+    if cm_map is not None:
+        np.save(out_dir / "cm_map.npy", np.asarray(cm_map, dtype=np.float32))
+        print("  → cm_map.npy")
+
+    cm_noise = r.get("cm_noise")
+    if isinstance(cm_noise, dict):
+        for name, arr in cm_noise.items():
+            np.save(out_dir / f"cm_noise_{name}.npy",
+                    np.asarray(arr, dtype=np.float32))
+            print(f"  → cm_noise_{name}.npy")
+    elif cm_noise is not None:
+        np.save(out_dir / "cm_noise.npy", np.asarray(cm_noise, dtype=np.float32))
+        print("  → cm_noise.npy")
+
+    if bad_pixel_mask is not None:
+        np.save(out_dir / "bad_pixel_mask.npy",
+                np.asarray(bad_pixel_mask, dtype=bool))
+        print("  → bad_pixel_mask.npy")
 
 
 def load_calibration_npy(
-        npy_dir:   str | Path,
-        asics:     list[str] | None = None,
-        prefer:    str = "sigclip",
-) -> dict[str, dict[str, np.ndarray]]:
+        npy_dir: str | Path,
+        prefer:  str = "sigclip",
+) -> dict:
     """
-    Load calibration from .npy files in *npy_dir*.
+    Load offset calibration from .npy files written by save_calibration_npy.
 
-    Files are expected as  <scope>_offset_sigclip.npy,  <scope>_noise.npy, etc.
-    Falls back gracefully when the preferred offset variant is absent.
-    """
-    npy_dir = Path(npy_dir)
-    alt     = "median" if prefer == "sigclip" else "sigclip"
-    cal: dict[str, dict] = {}
-
-    def _load(scope: str) -> dict | None:
-        d: dict = {}
-
-        # Offset: try preferred → alternative → any matching file
-        offset_found = False
-        for fname in [f"{scope}_offset_{prefer}.npy",
-                      f"{scope}_offset_{alt}.npy"]:
-            fp = npy_dir / fname
-            if fp.exists():
-                d["offset"]      = np.load(fp).astype(np.float32)
-                d["offset_type"] = fname.split("_offset_")[1].replace(".npy", "")
-                print(f"  loaded {fp.name}  {d['offset'].shape}")
-                offset_found = True
-                break
-        if not offset_found:
-            found = sorted(npy_dir.glob(f"{scope}_offset_*.npy"))
-            if found:
-                d["offset"]      = np.load(found[0]).astype(np.float32)
-                d["offset_type"] = found[0].stem.split("_offset_")[1]
-                print(f"  Warning: [{scope}] preferred='{prefer}' not found, "
-                      f"using '{found[0].name}'")
-                offset_found = True
-        if not offset_found:
-            print(f"  ✗  [{scope}] no offset .npy file found in {npy_dir}")
-            return None
-
-        # Noise: required
-        fp = npy_dir / f"{scope}_noise.npy"
-        if not fp.exists():
-            print(f"  ✗  [{scope}] {fp.name} not found in {npy_dir}")
-            return None
-        d["noise"] = np.load(fp).astype(np.float32)
-        print(f"  loaded {fp.name}  {d['noise'].shape}")
-
-        # Optional extras
-        for key, fname in [("cm_noise",      f"{scope}_cm_noise.npy"),
-                            ("n_clipped_map", f"{scope}_n_clipped_map.npy")]:
-            fp = npy_dir / fname
-            if fp.exists():
-                d[key] = np.load(fp).astype(np.float32)
-        return d
-
-    g = _load("global")
-    if g:
-        cal["global"] = g
-
-    for aname in (asics or []):
-        g = _load(aname)
-        if g:
-            cal[aname] = g
-        else:
-            print(f"  Warning: {aname} calibration .npy files not fully available")
-
-    if not cal:
-        raise RuntimeError(
-            f"No calibration data loaded from {npy_dir}.\n"
-            f"Run dark_frame_ana first.")
-    return cal
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Results HDF5 load functions
-# ──────────────────────────────────────────────────────────────────────────────
-
-def load_offset_results_h5(path: str | Path) -> dict:
-    """
-    Load plot-backing data from offset_results.h5.
-
-    Returns dict with keys: offsets, noise, bad_pixels, meta.
-    Each contains nested arrays/dicts matching the HDF5 structure.
-    """
-    path = Path(path)
-    out: dict = {}
-    with h5py.File(path, "r") as f:
-        # Offsets
-        offsets: dict = {}
-        for method in ["median", "sigmaclip", "diff"]:
-            if method in f["offsets"]:
-                g = f[f"offsets/{method}"]
-                offsets[method] = {
-                    "map":          g["map"][:],
-                    "hist_edges":   g["hist_edges"][:],
-                    "hist_counts":  g["hist_counts"][:],
-                }
-        out["offsets"] = offsets
-
-        # Noise
-        ng = f["noise"]
-        out["noise"] = {
-            "map":          ng["map"][:],
-            "hist_edges":   ng["hist_edges"][:],
-            "hist_counts":  ng["hist_counts"][:],
-        }
-        if "cm_noise" in ng:
-            cm: dict = {}
-            for name in ng["cm_noise"]:
-                cm[name] = ng[f"cm_noise/{name}"][:]
-            out["noise"]["cm_noise"] = cm
-        if "n_clipped/map" in ng:
-            out["noise"]["n_clipped_map"] = ng["n_clipped/map"][:]
-
-        # Bad pixels
-        if "bad_pixels" in f:
-            bg = f["bad_pixels"]
-            out["bad_pixels"] = {
-                "mask":              bg["mask"][:],
-                "noise_hist_edges":  bg["noise_hist_edges"][:],
-                "noise_hist_counts": bg["noise_hist_counts"][:],
-                "thresholds": {
-                    "median_noise":   float(bg["thresholds/median_noise"][()]),
-                    "hot_threshold":  float(bg["thresholds/hot_threshold"][()]),
-                    "cold_threshold": float(bg["thresholds/cold_threshold"][()]),
-                },
-            }
-            if "per_asic/n_bad" in bg:
-                out["bad_pixels"]["per_asic"] = {
-                    "n_bad":       bg["per_asic/n_bad"][:],
-                    "asic_labels": [l.decode() for l in bg["per_asic/asic_labels"][:]],
-                }
-            if "category_map" in bg:
-                out["bad_pixels"]["category_map"] = bg["category_map"][:]
-
-        # Metadata
-        if "meta" in f:
-            out["meta"] = dict(f["meta"].attrs)
-
-    print(f"  Loaded dark results from {path}")
-    return out
-
-
-def load_event_rec_results_h5(path: str | Path) -> dict:
-    """
-    Load plot-backing data from event_rec_results.h5.
-
-    Returns dict with keys: raw_spectrum, grade_distribution, meta.
-    """
-    path = Path(path)
-    out: dict = {}
-    with h5py.File(path, "r") as f:
-        # Raw spectrum
-        if "raw_spectrum" in f:
-            rg = f["raw_spectrum"]
-            out["raw_spectrum"] = {
-                "bin_edges":          rg["bin_edges"][:],
-                "all_pixels":        rg["all_pixels"][:],
-                "positive_pixels":    rg["positive_pixels"][:],
-                "above_seed":         rg["above_seed"][:],
-                "seed_threshold_adu": float(rg["seed_threshold_adu"][()]),
-                "seed_sigma":         float(rg["seed_sigma"][()]),
-                "median_noise_adu":   float(rg["median_noise_adu"][()]),
-            }
-
-        # Grade distribution
-        if "grade_distribution" in f:
-            gg = f["grade_distribution"]
-            out["grade_distribution"] = {
-                "grades":      gg["grades"][:],
-                "counts":      gg["counts"][:],
-                "grade_names": [n.decode() for n in gg["grade_names"][:]],
-            }
-
-        # Metadata
-        if "meta" in f:
-            out["meta"] = dict(f["meta"].attrs)
-
-    print(f"  Loaded source results from {path}")
-    return out
-
-
-def load_energy_cal_results_h5(path: str | Path) -> dict:
-    """
-    Load plot-backing data from energy_cal_results.h5.
-
-    Returns dict with keys: phase1_rough_gain, phase3_cti, phase4_column_gain,
-    pixel_gain_map, cti_per_col, final_spectrum, meta.
-    """
-    path = Path(path)
-    out: dict = {}
-    with h5py.File(path, "r") as f:
-        # Phase 1: Rough gain
-        if "phase1_rough_gain" in f:
-            p1: dict = {}
-            for parity in ["even", "odd"]:
-                if parity in f["phase1_rough_gain"]:
-                    pg = f[f"phase1_rough_gain/{parity}"]
-                    p1[parity] = {
-                        "hist_edges":  pg["hist_edges"][:],
-                        "hist_counts": pg["hist_counts"][:],
-                        "fit": {
-                            "peak_adu":   float(pg["fit/peak_adu"][()]),
-                            "sigma_adu":  float(pg["fit/sigma_adu"][()]),
-                            "amplitude":  float(pg["fit/amplitude"][()]),
-                            "success":    bool(pg["fit/success"][()]),
-                            "n_events":   int(pg["fit/n_events"][()]),
-                        },
-                    }
-            if "window" in f["phase1_rough_gain"]:
-                p1["window"] = {
-                    "lo_adu": float(f["phase1_rough_gain/window/lo_adu"][()]),
-                    "hi_adu": float(f["phase1_rough_gain/window/hi_adu"][()]),
-                }
-            out["phase1_rough_gain"] = p1
-
-        # Phase 3: CTI
-        if "phase3_cti" in f:
-            p3: dict = {}
-            for key in ["before", "after"]:
-                if key in f["phase3_cti"]:
-                    cg = f[f"phase3_cti/{key}"]
-                    p3[key] = {
-                        "row_bins":      cg["row_bins"][:],
-                        "peak_per_bin":  cg["peak_per_bin"][:],
-                        "peak_success":  cg["peak_success"][:],
-                    }
-            out["phase3_cti"] = p3
-
-        # Phase 4: Column gain
-        if "phase4_column_gain" in f:
-            p4: dict = {}
-            if "f_col_hist/bin_edges" in f["phase4_column_gain"]:
-                hg = f["phase4_column_gain/f_col_hist"]
-                p4["f_col_hist"] = {
-                    "bin_edges": hg["bin_edges"][:],
-                    "counts":    hg["counts"][:],
-                }
-            out["phase4_column_gain"] = p4
-
-        # Pixel gain map
-        if "pixel_gain_map" in f:
-            pgm = f["pixel_gain_map"]
-            out["pixel_gain_map"] = {
-                "g_eff":  pgm["g_eff"][:],
-                "parity": pgm["parity"][:],
-            }
-            if "g_eff_hist/bin_edges" in pgm:
-                hg = pgm["g_eff_hist"]
-                out["pixel_gain_map"]["g_eff_hist"] = {
-                    "bin_edges":   hg["bin_edges"][:],
-                    "counts_even": hg["counts_even"][:],
-                    "counts_odd":  hg["counts_odd"][:],
-                }
-
-        # CTI per column
-        if "cti_per_col" in f:
-            cpc = f["cti_per_col"]
-            out["cti_per_col"] = {
-                "col_bin_size": int(cpc["col_bin_size"][()]),
-            }
-
-        # Final spectrum
-        if "final_spectrum" in f:
-            fsg = f["final_spectrum"]
-            fs: dict = {
-                "bin_edges": fsg["bin_edges"][:],
-            }
-            if "all_grades/counts" in fsg:
-                fs["all_grades"] = {"counts": fsg["all_grades/counts"][:]}
-            if "per_group" in fsg:
-                groups: dict = {}
-                for grp_name in fsg["per_group"]:
-                    gg = fsg[f"per_group/{grp_name}"]
-                    groups[grp_name] = {
-                        "counts":    gg["counts"][:],
-                        "grade_ids": gg["grade_ids"][:],
-                    }
-                fs["per_group"] = groups
-            if "kalpha_fit/peak_ev" in fsg:
-                kf = fsg["kalpha_fit"]
-                fs["kalpha_fit"] = {
-                    "peak_ev":         float(kf["peak_ev"][()]),
-                    "sigma_ev":        float(kf["sigma_ev"][()]),
-                    "amplitude":       float(kf["amplitude"][()]),
-                    "fwhm_ev":         float(kf["fwhm_ev"][()]),
-                    "resolution_pct":  float(kf["resolution_pct"][()]),
-                    "n_events":        int(kf["n_events"][()]),
-                    "success":         bool(kf["success"][()]),
-                    "fit_window_lo":   float(kf["fit_window_lo"][()]),
-                    "fit_window_hi":   float(kf["fit_window_hi"][()]),
-                }
-            out["final_spectrum"] = fs
-
-        # Metadata
-        if "meta" in f:
-            out["meta"] = dict(f["meta"].attrs)
-
-    print(f"  Loaded gain results from {path}")
-    return out
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Event recognition results HDF5 save
-# ──────────────────────────────────────────────────────────────────────────────
-
-def save_event_rec_results_h5(
-        out_dir:      Path,
-        cluster_data: dict,          # ← was: events: np.ndarray
-        spectra:      dict[int, np.ndarray],
-        bin_edges:    np.ndarray,
-        hit_count:    np.ndarray,
-        mean_adu:     np.ndarray,
-        sample_arr:   np.ndarray | None,
-        noise_map:    np.ndarray,
-        gen:          dict,
-        seed_sigma:   float,
-        n_frames:     int,
-) -> None:
-    path = out_dir / "event_rec_results.h5"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\nSaving event_rec results: {path}")
-
-    with h5py.File(path, "w") as f:
-
-        # Raw spectrum
-        raw_data = _compute_raw_spectrum_data(
-            sample_arr, noise_map, bin_edges, seed_sigma)
-        if raw_data is not None:
-            rg = f.require_group("raw_spectrum")
-            for k, v in raw_data.items():
-                rg.create_dataset(k, data=v)
-
-        # Cluster-size distribution from CSR data
-        n_events = len(cluster_data["flag"])
-        if n_events > 0:
-            from ..physics.event_filter import n_pixels_per_event
-            npix = n_pixels_per_event(cluster_data)
-            npix_vals, npix_counts = np.unique(npix, return_counts=True)
-            cg = f.require_group("cluster_size_distribution")
-            cg.create_dataset("n_pixels", data=npix_vals.astype(np.int32))
-            cg.create_dataset("counts",   data=npix_counts.astype(np.int64))
-
-        # Metadata
-        mg = f.require_group("meta")
-        mg.attrs["seed_sigma"]  = seed_sigma
-        mg.attrs["split_sigma"] = float(gen.get("split_sigma", 3.0))
-        mg.attrs["n_frames"]    = n_frames
-        mg.attrs["n_events"]    = n_events
-        mg.attrs["frame_shape"] = (f"{noise_map.shape[0]}x"
-                                   f"{noise_map.shape[1]}")
-
-    print("  ✓ saved.")
-
-
-def _compute_raw_spectrum_data(
-        corrected_frames: np.ndarray | None,
-        noise_map: np.ndarray,
-        bin_edges: np.ndarray,
-        seed_sigma: float,
-) -> dict | None:
-    """
-    Compute raw spectrum histogram data from CM-corrected frames.
-
-    Returns dict with:
-        - bin_edges: shared bin edges
-        - all_pixels: histogram of all CM-corrected pixels
-        - positive_pixels: histogram of pixels > 0 ADU
-        - above_seed: histogram of pixels above seed threshold
-        - seed_threshold_adu: median seed threshold in ADU
-        - seed_sigma: seed sigma value
-        - median_noise_adu: median noise in ADU
-    """
-    if corrected_frames is None:
-        return None
-
-    corr_flat = corrected_frames.ravel()
-    pos_flat  = corr_flat[corr_flat > 0]
-
-    med_noise  = float(np.median(noise_map))
-    seed_adu   = seed_sigma * med_noise
-    seed_thr   = seed_sigma * noise_map
-    above_seed_mask = corrected_frames > seed_thr[np.newaxis]
-    hits_flat  = corrected_frames[above_seed_mask].ravel()
-
-    c_all,  _ = np.histogram(corr_flat, bins=bin_edges)
-    c_pos,  _ = np.histogram(pos_flat,  bins=bin_edges)
-    c_hits, _ = np.histogram(hits_flat, bins=bin_edges)
-
-    return {
-        "bin_edges":           bin_edges.astype(np.float32),
-        "all_pixels":          c_all.astype(np.int64),
-        "positive_pixels":     c_pos.astype(np.int64),
-        "above_seed":          c_hits.astype(np.int64),
-        "seed_threshold_adu": float(seed_adu),
-        "seed_sigma":          float(seed_sigma),
-        "median_noise_adu":    med_noise,
-    }
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Energy calibration HDF5 save/load
-# ──────────────────────────────────────────────────────────────────────────────
-
-def save_energy_cal_h5(
-        path:         str | Path,
-        gain_map:     np.ndarray,
-        cte_map:      np.ndarray,
-        bad_gain_map: np.ndarray,
-        grades:       np.ndarray,
-        energy_sum:   np.ndarray,
-        cog_row:      np.ndarray,
-        cog_col:      np.ndarray,
-        seed_energy:  np.ndarray,
-        mean_gain:    np.ndarray,
-        metadata:     dict | None = None,
-) -> None:
-    """
-    Save gain+CTI calibration results to HDF5.
-
-    Structure::
-
-        /gain_map         float64 (n_rows, n_cols)   eV/ADU per pixel
-        /cte_map          float64 (n_rows, n_cols)   cumulative CTE per pixel
-        /bad_gain_map     int8    (n_rows, n_cols)   0=good 1=fallback 2=kept
-        /events/grades    int8    (n_events,)
-        /events/energy_sum  float32 (n_events,)      [eV]
-        /events/cog_row     float32 (n_events,)
-        /events/cog_col     float32 (n_events,)
-        /events/seed_energy float32 (n_events,)      [eV]
-        /mean_gain        float64 (n_parity,)        fallback gain per parity
-        /meta             attrs
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\nSaving energy calibration: {path}")
-
-    with h5py.File(path, "w") as f:
-        f.create_dataset("gain_map",     data=gain_map,
-                         compression="gzip")
-        f.create_dataset("cte_map",      data=cte_map,
-                         compression="gzip")
-        f.create_dataset("bad_gain_map", data=bad_gain_map,
-                         compression="gzip")
-        f.create_dataset("mean_gain",    data=mean_gain)
-
-        eg = f.require_group("events")
-        eg.create_dataset("grades",      data=grades,      compression="gzip")
-        eg.create_dataset("energy_sum",  data=energy_sum,  compression="gzip")
-        eg.create_dataset("cog_row",     data=cog_row,     compression="gzip")
-        eg.create_dataset("cog_col",     data=cog_col,     compression="gzip")
-        eg.create_dataset("seed_energy", data=seed_energy, compression="gzip")
-
-        if metadata:
-            mg = f.require_group("meta")
-            for k, v in metadata.items():
-                try:
-                    mg.attrs[k] = v
-                except TypeError:
-                    mg.attrs[k] = str(v)
-
-    print("  ✓ saved.")
-
-
-def load_energy_cal_h5(path: str | Path) -> dict:
-    """
-    Load gain+CTI calibration results from HDF5.
+    Parameters
+    ----------
+    npy_dir : directory containing the .npy files
+    prefer  : which offset method to load as the primary "offset" key
+              ("sigclip" | "median")
 
     Returns
     -------
-    dict with keys:
-        gain_map, cte_map, bad_gain_map, mean_gain   — maps
-        grades, energy_sum, cog_row, cog_col, seed_energy — per event
-        meta
+    dict with keys: offset, offset_type, noise, n_clipped_map (optional),
+    cm_map (optional), cm_noise (optional; dict for per-ASIC),
+    bad_pixel_mask (optional).
     """
-    path = Path(path)
-    out: dict = {}
-    with h5py.File(path, "r") as f:
-        out["gain_map"]     = f["gain_map"][:]
-        out["cte_map"]      = f["cte_map"][:]
-        out["bad_gain_map"] = f["bad_gain_map"][:]
-        out["mean_gain"]    = f["mean_gain"][:]
+    npy_dir = Path(npy_dir)
+    alt = "median" if prefer == "sigclip" else "sigclip"
+    d: dict = {}
 
-        eg = f.get("events")
-        if eg is not None:
-            out["grades"]      = eg["grades"][:]
-            out["energy_sum"]  = eg["energy_sum"][:]
-            out["cog_row"]     = eg["cog_row"][:]
-            out["cog_col"]     = eg["cog_col"][:]
-            out["seed_energy"] = eg["seed_energy"][:]
+    # Offset: preferred → alternative → any
+    for name in (prefer, alt):
+        fp = npy_dir / f"offset_{name}.npy"
+        if fp.exists():
+            d["offset"] = np.load(fp).astype(np.float32)
+            d["offset_type"] = name
+            print(f"  loaded {fp.name}  {d['offset'].shape}")
+            break
+    else:
+        found = sorted(npy_dir.glob("offset_*.npy"))
+        if found:
+            d["offset"] = np.load(found[0]).astype(np.float32)
+            d["offset_type"] = found[0].stem.split("offset_")[1]
+            print(f"  Warning: preferred '{prefer}' not found, "
+                  f"using '{found[0].name}'")
+        else:
+            raise RuntimeError(
+                f"No offset_*.npy found in {npy_dir}.\n"
+                f"Run  pnccd-offset  first.")
 
-        meta = f.get("meta")
-        out["meta"] = dict(meta.attrs) if meta is not None else {}
+    # Required noise map
+    fp = npy_dir / "noise.npy"
+    if not fp.exists():
+        raise RuntimeError(f"{fp.name} not found in {npy_dir}.")
+    d["noise"] = np.load(fp).astype(np.float32)
+    print(f"  loaded {fp.name}  {d['noise'].shape}")
 
-    print(f"  Loaded energy calibration from {path}")
-    g = out["gain_map"]
-    print(f"    gain_map  shape={g.shape}  "
-          f"mean={g[g>0].mean():.4f} eV/ADU  "
-          f"n_good={(out['bad_gain_map']==0).sum()}")
-    return out
+    # Optional maps
+    for key, fname in [("n_clipped_map",  "n_clipped_map.npy"),
+                       ("cm_map",         "cm_map.npy"),
+                       ("bad_pixel_mask", "bad_pixel_mask.npy")]:
+        fp = npy_dir / fname
+        if fp.exists():
+            d[key] = np.load(fp)
+            print(f"  loaded {fp.name}  {d[key].shape}")
 
+    # CM noise: per-ASIC files, else a single file
+    per_asic = {p.stem.split("cm_noise_")[1]: np.load(p).astype(np.float32)
+                for p in sorted(npy_dir.glob("cm_noise_*.npy"))}
+    if per_asic:
+        d["cm_noise"] = per_asic
+    elif (npy_dir / "cm_noise.npy").exists():
+        d["cm_noise"] = np.load(npy_dir / "cm_noise.npy").astype(np.float32)
 
-def save_energy_cal_results_h5(
-        plot_dir:     Path,
-        gain_map:     np.ndarray,
-        cte_map:      np.ndarray,
-        bad_gain_map: np.ndarray,
-        col_peaks,
-        grades:       np.ndarray,
-        energy_sum:   np.ndarray,
-        filtered,
-        fit_result:   dict,
-        metadata:     dict | None = None,
-) -> None:
-    """
-    Save plot-backing data for energy_cal stage.
-
-    Written to: {plot_dir}/energy_cal_results.h5
-
-    Structure
-    ---------
-    /gain_map                        float64 (n_rows, n_cols)
-    /cte_map                         float64 (n_rows, n_cols)
-    /bad_gain_map                    int8    (n_rows, n_cols)
-    /column_peaks/ppos               float64 (n_cols, n_halves)
-    /column_peaks/sigma              float64 (n_cols, n_halves)
-    /column_peaks/used_fallback     bool    (n_cols, n_halves)
-    /grades                          int8    (n_events,)
-    /energy_sum                      float32 (n_events,)
-    /filtered/adu_sum               float64 (n_filtered,)
-    /filtered/row                   float64 (n_filtered,)
-    /filtered/col                    float64 (n_filtered,)
-    /resolution_fit/<key>            attrs
-    /meta                            attrs
-    """
-    import h5py
-
-    path = Path(plot_dir) / "energy_cal_results.h5"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\nSaving energy_cal results: {path}")
-
-    with h5py.File(path, "w") as f:
-
-        # Maps
-        f.create_dataset("gain_map",     data=gain_map,
-                         compression="gzip")
-        f.create_dataset("cte_map",      data=cte_map,
-                         compression="gzip")
-        f.create_dataset("bad_gain_map", data=bad_gain_map,
-                         compression="gzip")
-
-        # Column peaks
-        cg = f.require_group("column_peaks")
-        cg.create_dataset("ppos",          data=col_peaks.ppos)
-        cg.create_dataset("sigma",         data=col_peaks.sigma)
-        cg.create_dataset("used_fallback", data=col_peaks.used_fallback)
-
-        # Grade and energy
-        f.create_dataset("grades",     data=grades,     compression="gzip")
-        f.create_dataset("energy_sum", data=energy_sum, compression="gzip")
-
-        # Filtered events (for signal_vs_row plot)
-        fg = f.require_group("filtered")
-        fg.create_dataset("adu_sum", data=filtered.adu_sum, compression="gzip")
-        fg.create_dataset("row",     data=filtered.row,     compression="gzip")
-        fg.create_dataset("col",     data=filtered.col,     compression="gzip")
-
-        # Resolution fit result
-        rg = f.require_group("resolution_fit")
-        for k, v in fit_result.items():
-            try:
-                rg.attrs[k] = v
-            except TypeError:
-                rg.attrs[k] = str(v)
-
-        # Metadata
-        if metadata:
-            mg = f.require_group("meta")
-            for k, v in metadata.items():
-                try:
-                    mg.attrs[k] = v
-                except TypeError:
-                    mg.attrs[k] = str(v)
-
-    print("  ✓ saved.")
+    return d

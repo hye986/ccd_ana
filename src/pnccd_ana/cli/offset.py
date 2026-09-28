@@ -25,10 +25,10 @@ from ..physics import (compute_offset_median,
                        apply_common_mode_correction,
                        compute_noise,
                        compute_cm_noise,
-                       ASIC_SLICES, ASIC_MASK, ASIC_WIDTH,
+                       ASIC_SLICES, ASIC_WIDTH,
                        build_bad_pixel_mask,
                        configure_asics, get_active_mask)
-from ..io import (save_calibration_h5, save_calibration_npy)
+from ..io import save_calibration_npy
 from ..plotting import (plot_offsets, plot_noise, plot_cm_map, plot_bad_pixels)
 
 
@@ -44,7 +44,9 @@ def _analyse_scope(data:          np.ndarray,
                    asic_slices:   dict[str, tuple[int, int, int, int]] | None = None,
                    build_bp_mask: bool = True,
                    active_mask:   np.ndarray | None = None,
-                   split_even_odd: bool = False) -> dict:
+                   split_even_odd: bool = False,
+                   save_plots:    bool = True,
+                   bpm_cfg:       dict | None = None) -> dict:
     """
     Run offset → CM → noise pipeline for one data block.
 
@@ -62,7 +64,7 @@ def _analyse_scope(data:          np.ndarray,
     Returns
     -------
     dict with keys: offset_median?, offset_sigclip?, noise, cm_noise,
-                    n_clipped_map?, cm_map, data_corrected, bad_pixel_mask?
+                    n_clipped_map?, cm_map, asic_names, bad_pixel_mask?
     """
     print(f"\n── {label} ──")
     r: dict       = {}
@@ -81,28 +83,32 @@ def _analyse_scope(data:          np.ndarray,
         data, ref_offset, label, asic_slices=asic_slices, split_even_odd=split_even_odd)
     r["noise"]    = compute_noise(corrected, keep_mask, label)
     r["cm_noise"] = compute_cm_noise(cm_map, label, asic_names=asic_names)
-    r["cm_map"]         = cm_map
-    r["asic_names"]     = asic_names
-    r["data_corrected"] = corrected
+    r["cm_map"]    = cm_map
+    r["asic_names"] = asic_names
 
     if build_bp_mask:
+        bpm = bpm_cfg or {}
         bad_pixel_mask = build_bad_pixel_mask(
             r["noise"],
             n_clipped_map=n_clipped_map,
             n_dark_frames=data.shape[0] if n_clipped_map is not None else 0,
+            hot_rms_multiple=float(bpm.get("hot_rms_multiple", 5.0)),
+            cold_rms_fraction=float(bpm.get("cold_rms_fraction", 0.1)),
+            max_clip_fraction=float(bpm.get("max_clip_fraction", 0.5)),
             active_mask=active_mask,
             label=label,
         )
         r["bad_pixel_mask"] = bad_pixel_mask
 
-    scope_dir = out_dir / label
-    scope_dir.mkdir(parents=True, exist_ok=True)
-    plot_offsets(label, r, scope_dir, active_mask=active_mask)
-    plot_noise(label, r, scope_dir, active_mask=active_mask)
-    plot_cm_map(label, cm_map, scope_dir, asic_names=asic_names)
-    if build_bp_mask and r.get("bad_pixel_mask") is not None:
-        plot_bad_pixels(label, r["noise"], r["bad_pixel_mask"],
-                        scope_dir, active_mask=active_mask)
+    if save_plots:
+        scope_dir = out_dir / label
+        scope_dir.mkdir(parents=True, exist_ok=True)
+        plot_offsets(label, r, scope_dir, active_mask=active_mask)
+        plot_noise(label, r, scope_dir, active_mask=active_mask)
+        plot_cm_map(label, cm_map, scope_dir, asic_names=asic_names)
+        if build_bp_mask and r.get("bad_pixel_mask") is not None:
+            plot_bad_pixels(label, r["noise"], r["bad_pixel_mask"],
+                            scope_dir, active_mask=active_mask)
 
     return r
 
@@ -240,190 +246,33 @@ def run(cfg: Config) -> dict:
     # ── Run analysis ──────────────────────────────────────────────────────────
     all_results: dict = {}
     split_even_odd = bool(oc.get("split_even_odd", True))
-    # PLOT_LABEL is used for subfolder name and plot titles; results dict
-    # key stays "global" so the HDF5 save structure is unchanged.
+    # PLOT_LABEL is used for the plot subfolder name and plot titles.
     PLOT_LABEL = "offset"
     all_results["global"] = _analyse_scope(
         data_raw, PLOT_LABEL, methods, n_sigma, out_dir,
         asic_slices=asic_slices, build_bp_mask=True, active_mask=active_mask,
-        split_even_odd=split_even_odd)
+        split_even_odd=split_even_odd, save_plots=bool(oc.get("save_plots", True)),
+        bpm_cfg=oc.get("bad_pixel_mask"))
 
-    # ── Save primary calibration ──────────────────────────────────────────────
-    def _strip(r: dict) -> dict:
-        return {k: v for k, v in r.items()
-                if k not in ("cm_map", "data_corrected", "keep_mask")}
-
-    save_payload = {"global": _strip(all_results["global"])}
-
-    if oc["save_h5"]:
-        save_calibration_h5(
-            out_dir / "offset.h5",
-            save_payload,
-            n_sigma=n_sigma,
-            n_frames=total_frames,
-            methods=methods,
-            metadata=gen.get("metadata", {}),
-        )
+    # ── Save .npy outputs ─────────────────────────────────────────────────────
+    r = all_results["global"]
     if oc["save_npy"]:
-        save_calibration_npy(out_dir, save_payload)
-
-    # ── Save plot-backing data ────────────────────────────────────────────────
-    plot_dir = out_dir / "offset"
-    plot_dir.mkdir(parents=True, exist_ok=True)
-    _save_offset_results_h5(
-        plot_dir, all_results, active_mask, gen,
-        n_sigma, total_frames, methods, n_asics)
+        save_calibration_npy(
+            out_dir,
+            {"global": r},
+            cm_map=r.get("cm_map"),
+            bad_pixel_mask=r.get("bad_pixel_mask"),
+        )
 
     print(f"\n✓ Offset calibration complete.  Output: {out_dir}/")
     return all_results
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Plot-backing data
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _save_offset_results_h5(
-        plot_dir:   Path,
-        results:   dict,
-        active_mask: np.ndarray,
-        gen:       dict,
-        n_sigma:   float,
-        n_frames:  int,
-        methods:   list[str],
-        n_asics:   int,
-) -> None:
-    """
-    Save histogram and map data backing the offset calibration plots.
-
-    Written to: {plot_dir}/offset_results.h5
-
-    Structure
-    ---------
-    /offsets/median/{map, hist_edges, hist_counts}
-    /offsets/sigmaclip/{map, hist_edges, hist_counts}
-    /offsets/diff/{map, hist_edges, hist_counts}     (if both methods run)
-    /noise/{map, hist_edges, hist_counts}
-    /noise/cm_noise/{asic_name or 'global'}
-    /noise/n_clipped/map
-    /bad_pixels/{mask, noise_hist_edges, noise_hist_counts}
-    /bad_pixels/thresholds/{median_noise, hot_threshold, cold_threshold}
-    /bad_pixels/per_asic/{asic_labels, n_bad}
-    /meta  (attrs)
-    """
-    import h5py   # local import — only needed here
-
-    path = plot_dir / "offset_results.h5"
-    print(f"\nSaving offset results: {path}")
-
-    r = results.get("global", {})
-    noise = r["noise"].astype(np.float32)
-
-    def _hist(arr: np.ndarray, n_bins: int = 200):
-        flat = arr.ravel()
-        flat = flat[~np.isnan(flat)]
-        if len(flat) == 0:
-            return np.zeros(n_bins + 1, np.float32), np.zeros(n_bins, np.int64)
-        lo, hi = np.percentile(flat, [0.5, 99.5])
-        counts, edges = np.histogram(flat, bins=n_bins, range=(lo, hi))
-        return edges.astype(np.float32), counts.astype(np.int64)
-
-    with h5py.File(path, "w") as f:
-
-        # ── Offsets ───────────────────────────────────────────────────────────
-        og = f.require_group("offsets")
-        for method in methods:
-            key = f"offset_{method}"
-            if key not in r:
-                continue
-            arr    = r[key].astype(np.float32)
-            masked = np.where(active_mask, arr, np.nan)
-            mg = og.require_group(method)
-            mg.create_dataset("map",         data=arr, compression="gzip")
-            edges, counts = _hist(masked)
-            mg.create_dataset("hist_edges",  data=edges)
-            mg.create_dataset("hist_counts", data=counts)
-
-        if "offset_median" in r and "offset_sigclip" in r:
-            diff   = (r["offset_median"] - r["offset_sigclip"]).astype(np.float32)
-            masked = np.where(active_mask, diff, np.nan)
-            dg = og.require_group("diff")
-            dg.create_dataset("map",         data=diff, compression="gzip")
-            edges, counts = _hist(masked)
-            dg.create_dataset("hist_edges",  data=edges)
-            dg.create_dataset("hist_counts", data=counts)
-
-        # ── Noise ─────────────────────────────────────────────────────────────
-        ng     = f.require_group("noise")
-        masked = np.where(active_mask, noise, np.nan)
-        ng.create_dataset("map",         data=noise, compression="gzip")
-        edges, counts = _hist(masked)
-        ng.create_dataset("hist_edges",  data=edges)
-        ng.create_dataset("hist_counts", data=counts)
-
-        cm_noise = r.get("cm_noise")
-        if cm_noise is not None:
-            cmg = ng.require_group("cm_noise")
-            if isinstance(cm_noise, dict):
-                for name, vals in cm_noise.items():
-                    cmg.create_dataset(name, data=vals.astype(np.float32))
-            else:
-                cmg.create_dataset("global",
-                                   data=np.asarray(cm_noise).astype(np.float32))
-
-        n_clipped = r.get("n_clipped_map")
-        if n_clipped is not None:
-            ng.require_group("n_clipped").create_dataset(
-                "map", data=n_clipped.astype(np.float32), compression="gzip")
-
-        # ── Bad pixels ────────────────────────────────────────────────────────
-        bp_mask = r.get("bad_pixel_mask")
-        if bp_mask is not None:
-            bpg = f.require_group("bad_pixels")
-            bpg.create_dataset("mask", data=bp_mask)
-
-            masked_noise = np.where(active_mask, noise, np.nan)
-            edges, counts = _hist(masked_noise)
-            bpg.create_dataset("noise_hist_edges",  data=edges)
-            bpg.create_dataset("noise_hist_counts", data=counts)
-
-            med_noise = float(np.nanmedian(masked_noise))
-            bpm_cfg   = gen.get("bad_pixel_mask", {})
-            hot_thr   = med_noise * float(bpm_cfg.get("hot_rms_multiple",  5.0))
-            cold_thr  = med_noise * float(bpm_cfg.get("cold_rms_fraction", 0.1))
-            tg = bpg.require_group("thresholds")
-            tg.create_dataset("median_noise",  data=med_noise)
-            tg.create_dataset("hot_threshold",  data=hot_thr)
-            tg.create_dataset("cold_threshold", data=cold_thr)
-
-            asic_width  = int(noise.shape[1]) // n_asics if n_asics > 0 else ASIC_WIDTH
-            asic_labels = [f"C{i}" for i in range(n_asics)]
-            n_bad = np.array([
-                int(bp_mask[:, i*asic_width:(i+1)*asic_width].sum())
-                for i in range(n_asics)
-            ], dtype=np.int32)
-            ag = bpg.require_group("per_asic")
-            ag.create_dataset("asic_labels",
-                              data=[lb.encode() for lb in asic_labels])
-            ag.create_dataset("n_bad", data=n_bad)
-
-        # ── Metadata ──────────────────────────────────────────────────────────
-        mg = f.require_group("meta")
-        mg.attrs["n_dark_frames"]     = n_frames
-        mg.attrs["sigma_clip_nsigma"] = n_sigma
-        mg.attrs["methods"]           = ",".join(methods)
-        mg.attrs["n_asics"]           = n_asics
-        mg.attrs["asic_width"]        = ASIC_WIDTH
-
-    print("  ✓ saved.")
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="pnCCD offset calibration (step 1 of 3)",
+        description="pnCCD offset calibration",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
     parser.add_argument("config", help="Path to analysis.yaml  "

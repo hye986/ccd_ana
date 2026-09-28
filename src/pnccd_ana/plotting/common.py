@@ -1,10 +1,10 @@
 """
 pnccd_ana.plotting.common
 ==========================
-Shared plotting helpers used across all plotting modules.
+Shared plotting helpers used across the offset plotting module.
 
-Deliberately kept free of physics imports so that offset and event_rec
-stages do not trigger loading of calibrate.py / gain.py / cti.py.
+Deliberately kept free of physics imports so that the offset stage does
+not trigger loading of the analysis modules.
 """
 
 from __future__ import annotations

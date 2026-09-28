@@ -160,6 +160,75 @@ def plot_noise(scope_name: str, r: dict, out_dir: Path,
 
 
 
+def plot_cm_map(
+        scope_name:  str,
+        cm_map:      np.ndarray,
+        out_dir:     Path,
+        asic_names:  list[str] | None = None,
+) -> None:
+    """
+    (Frame × Y) heatmap of CM correction values.
+
+    For per-ASIC CM (3-D input), produces one plot per ASIC.
+    """
+    out_dir = Path(out_dir)
+
+    if cm_map.ndim == 3 and asic_names:
+        for i, name in enumerate(asic_names):
+            asic_cm = cm_map[:, :, i]
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            fig.suptitle(f"Common-Mode Correction — ASIC {name}",
+                         fontsize=13, fontweight="bold")
+
+            vext = float(np.percentile(np.abs(asic_cm), 99))
+            im   = axes[0].imshow(asic_cm, origin="lower", cmap="RdBu_r",
+                                   vmin=-vext, vmax=vext, aspect="auto")
+            axes[0].set_xlabel("Y [detector row]")
+            axes[0].set_ylabel("Frame index")
+            axes[0].set_title(f"CM Value per (Frame, Detector Row) — {name}")
+            _cb(axes[0], im)
+
+            axes[1].plot(asic_cm.mean(axis=1), lw=0.8, color="slateblue")
+            axes[1].axhline(0, color="k", lw=0.5, ls="--")
+            axes[1].set_xlabel("Frame index")
+            axes[1].set_ylabel("Mean CM (ADU)")
+            axes[1].set_title(f"Frame-Average CM — {name}")
+            axes[1].grid(alpha=0.3)
+
+            plt.tight_layout()
+            p = out_dir / f"cm_map_{name}.png"
+            fig.savefig(p, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            print(f"  → {p}")
+        return
+
+    # 2-D legacy path (n_frames, n_Y)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(f"Common-Mode Correction — {scope_name}",
+                 fontsize=13, fontweight="bold")
+
+    vext = float(np.percentile(np.abs(cm_map), 99))
+    im   = axes[0].imshow(cm_map, origin="lower", cmap="RdBu_r",
+                           vmin=-vext, vmax=vext, aspect="auto")
+    axes[0].set_xlabel("Y [detector row]")
+    axes[0].set_ylabel("Frame index")
+    axes[0].set_title("CM Value per (Frame, Detector Row)")
+    _cb(axes[0], im)
+
+    axes[1].plot(cm_map.mean(axis=1), lw=0.8, color="slateblue")
+    axes[1].axhline(0, color="k", lw=0.5, ls="--")
+    axes[1].set_xlabel("Frame index")
+    axes[1].set_ylabel("Mean CM (ADU)")
+    axes[1].set_title("Frame-Average CM  (outliers = bad frames)")
+    axes[1].grid(alpha=0.3)
+
+    plt.tight_layout()
+    p = out_dir / f"cm_map_{scope_name}.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  → {p}")
+
+
 def plot_bad_pixels(
         scope_name:   str,
         noise_map:    np.ndarray,

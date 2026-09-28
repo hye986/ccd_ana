@@ -1,10 +1,11 @@
 """
 test_redraw_offset.py
 =====================
-Redraw diagnostic plots from offset_results.h5.
+Redraw diagnostic plots from the offset-calibration .npy files.
 
-This script reloads the plot-backing data saved by the offset stage
-and regenerates the same diagnostic plots without rerunning the pipeline.
+This script reloads the calibration arrays saved by the offset stage
+(offset, noise, CM map, bad pixel mask) and regenerates diagnostic plots
+without rerunning the pipeline.
 
 Usage
 -----
@@ -14,9 +15,8 @@ Usage
 Output
 ------
     offset_plots/offsets_global.png     - offset maps + histograms
-    offset_plots/noise_global.png       - noise map, CM noise, clip map
-    offset_plots/cm_map_C{i}.png        - CM correction per ASIC
-    offset_plots/bad_pixels_global.png  - bad pixel categories + per-ASIC stats
+    offset_plots/noise_global.png       - noise map + histogram
+    offset_plots/bad_pixels_global.png  - noise with bad pixels hidden + mask
 """
 
 import argparse
@@ -28,267 +28,179 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def redraw_offset_plots(results_path: str | Path, output_dir: str | Path | None = None):
+def redraw_offset_plots(npy_dir: str | Path,
+                        output_dir: str | Path | None = None) -> None:
     """
-    Load offset_results.h5 and redraw all offset stage plots.
+    Load offset .npy calibration files and redraw the offset stage plots.
 
     Parameters
     ----------
-    results_path : path to offset_results.h5
-    output_dir   : output directory for plots (default: ./offset_plots)
+    npy_dir    : directory containing offset/noise/cm/bad-pixel .npy files
+    output_dir : output directory for plots (default: <npy_dir>/offset_plots)
     """
-    from pnccd_ana.analysis import load_offset_results
-
-    results_path = Path(results_path)
-    if output_dir is None:
-        output_dir = results_path.parent / "offset_plots"
-    else:
-        output_dir = Path(output_dir)
+    npy_dir = Path(npy_dir)
+    output_dir = Path(output_dir) if output_dir is not None \
+        else npy_dir / "offset_plots"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading offset results from: {results_path}")
-    data = load_offset_results(results_path)
+    print(f"Loading offset calibration from: {npy_dir}")
+    data = _load_npy(npy_dir)
 
-    # ── Extract data ───────────────────────────────────────────────────────────
-    offsets = data.get("offsets", {})
-    noise = data.get("noise", {})
-    bad_pixels = data.get("bad_pixels", {})
-    meta = data.get("meta", {})
-
-    # ── 1. Offset maps + histograms ─────────────────────────────────────────────
-    _plot_offsets_redraw(offsets, output_dir, meta)
-
-    # ── 2. Noise map + CM noise + clip map ────────────────────────────────────
-    _plot_noise_redraw(noise, output_dir, meta)
-
-    # ── 3. Bad pixel categories ────────────────────────────────────────────────
-    _plot_bad_pixels_redraw(bad_pixels, noise, output_dir, meta)
+    _plot_offsets_redraw(data, output_dir)
+    _plot_noise_redraw(data, output_dir)
+    _plot_bad_pixels_redraw(data, output_dir)
 
     print(f"\n✓ Offset plots redrawn to: {output_dir}/")
 
 
-def _plot_offsets_redraw(offsets: dict, out_dir: Path, meta: dict):
+def _load_npy(npy_dir: Path) -> dict:
+    """Load whichever .npy products are present in *npy_dir*."""
+    d: dict = {}
+    for key, fname in [("median",         "offset_median.npy"),
+                       ("sigmaclip",      "offset_sigclip.npy"),
+                       ("noise",          "noise.npy"),
+                       ("n_clipped_map",  "n_clipped_map.npy"),
+                       ("cm_map",         "cm_map.npy"),
+                       ("bad_pixel_mask", "bad_pixel_mask.npy")]:
+        fp = npy_dir / fname
+        if fp.exists():
+            d[key] = np.load(fp)
+            print(f"  loaded {fname}  {d[key].shape}")
+    for p in sorted(npy_dir.glob("cm_noise_*.npy")):
+        d.setdefault("cm_noise", {})[p.stem.split("cm_noise_")[1]] = np.load(p)
+    return d
+
+
+def _plot_offsets_redraw(d: dict, out_dir: Path) -> None:
     """Redraw offset maps and histograms."""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    present = [(n, d[n]) for n in ("median", "sigmaclip") if n in d]
+    if not present:
+        return
+    ncols = len(present) + (1 if len(present) == 2 else 0)
+    fig, axes = plt.subplots(2, ncols, figsize=(5 * ncols + 5, 10), squeeze=False)
     fig.suptitle("Offset Maps and Histograms", fontsize=14, fontweight="bold")
 
-    methods = ["median", "sigmaclip"]
-    for col, method in enumerate(methods):
-        if method not in offsets:
-            continue
-        m = offsets[method]
+    for col, (name, arr) in enumerate(present):
+        im = axes[0, col].imshow(arr, origin="lower", cmap="coolwarm",
+                                 vmin=np.nanpercentile(arr, 1),
+                                 vmax=np.nanpercentile(arr, 99), aspect="auto")
+        axes[0, col].set_title(f"{name.capitalize()} Offset Map")
+        axes[0, col].set_xlabel("X [detector column]")
+        axes[0, col].set_ylabel("Y [detector row]")
+        plt.colorbar(im, ax=axes[0, col], label="Offset [ADU]")
 
-        # Map
-        ax_map = axes[0, col]
-        im = ax_map.imshow(m["map"], origin="lower", cmap="coolwarm",
-                          vmin=np.nanpercentile(m["map"], 1),
-                          vmax=np.nanpercentile(m["map"], 99))
-        ax_map.set_title(f"{method.capitalize()} Offset Map")
-        ax_map.set_xlabel("X [detector column]")
-        ax_map.set_ylabel("Y [detector row]")
-        plt.colorbar(im, ax=ax_map, label="Offset [ADU]")
+        axes[1, col].hist(arr.ravel(), bins=100, alpha=0.7, color=f"C{col}")
+        axes[1, col].set_xlabel("Offset [ADU]")
+        axes[1, col].set_ylabel("Count")
+        axes[1, col].set_title(f"{name.capitalize()} Histogram")
+        axes[1, col].grid(alpha=0.3)
 
-        # Histogram
-        ax_hist = axes[1, col]
-        ax_hist.hist(m["map"].ravel(), bins=100, alpha=0.7, color=f"C{col}")
-        ax_hist.set_xlabel("Offset [ADU]")
-        ax_hist.set_ylabel("Count")
-        ax_hist.set_title(f"{method.capitalize()} Histogram")
-        ax_hist.grid(alpha=0.3)
-
-        # Stats
-        mean_val = np.nanmean(m["map"])
-        std_val = np.nanstd(m["map"])
-        ax_hist.text(0.97, 0.97,
-                    f"μ={mean_val:.1f}\nσ={std_val:.1f}",
-                    transform=ax_hist.transAxes, ha="right", va="top",
-                    fontsize=9, bbox=dict(boxstyle="round", fc="white", alpha=0.8))
-
-    # Difference map (if both methods exist)
-    if "median" in offsets and "sigmaclip" in offsets:
-        ax_diff = axes[0, 2]
-        diff = offsets["sigmaclip"]["map"] - offsets["median"]["map"]
-        im = ax_diff.imshow(diff, origin="lower", cmap="PiYG",
-                           vmin=-np.nanpercentile(np.abs(diff), 99),
-                           vmax=np.nanpercentile(np.abs(diff), 99))
-        ax_diff.set_title("Difference (sigclip - median)")
-        ax_diff.set_xlabel("X [detector column]")
-        ax_diff.set_ylabel("Y [detector row]")
-        plt.colorbar(im, ax=ax_diff, label="Diff [ADU]")
-
-        ax_hist2 = axes[1, 2]
-        ax_hist2.hist(diff.ravel(), bins=100, alpha=0.7, color="purple")
-        ax_hist2.set_xlabel("Difference [ADU]")
-        ax_hist2.set_ylabel("Count")
-        ax_hist2.set_title("Difference Histogram")
-        ax_hist2.grid(alpha=0.3)
-    else:
-        axes[0, 2].axis("off")
-        axes[1, 2].axis("off")
+    if len(present) == 2:
+        diff = present[1][1] - present[0][1]
+        lim = float(np.nanpercentile(np.abs(diff), 99)) or 1.0
+        im = axes[0, ncols - 1].imshow(diff, origin="lower", cmap="PiYG",
+                                       vmin=-lim, vmax=lim, aspect="auto")
+        axes[0, ncols - 1].set_title("Difference (sigclip − median)")
+        axes[0, ncols - 1].set_xlabel("X [detector column]")
+        axes[0, ncols - 1].set_ylabel("Y [detector row]")
+        plt.colorbar(im, ax=axes[0, ncols - 1], label="Diff [ADU]")
+        axes[1, ncols - 1].hist(diff.ravel(), bins=100, alpha=0.7, color="purple")
+        axes[1, ncols - 1].set_xlabel("Difference [ADU]")
+        axes[1, ncols - 1].set_ylabel("Count")
+        axes[1, ncols - 1].grid(alpha=0.3)
 
     plt.tight_layout()
-    fig.savefig(out_dir / "offsets_global.png", dpi=150, bbox_inches="tight")
+    p = out_dir / "offsets_global.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  → {out_dir / 'offsets_global.png'}")
+    print(f"  → {p}")
 
 
-def _plot_noise_redraw(noise: dict, out_dir: Path, meta: dict):
-    """Redraw noise map, CM noise, and clip map."""
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+def _plot_noise_redraw(d: dict, out_dir: Path) -> None:
+    """Redraw noise map, histogram, and clip map."""
+    noise_map = d.get("noise")
+    if noise_map is None:
+        return
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
     fig.suptitle("Noise Analysis", fontsize=14, fontweight="bold")
 
-    # Noise map
-    ax0 = axes[0]
-    noise_map = noise.get("map")
-    if noise_map is not None:
-        im = ax0.imshow(noise_map, origin="lower", cmap="viridis",
-                       vmin=np.nanpercentile(noise_map, 1),
-                       vmax=np.nanpercentile(noise_map, 99))
-        ax0.set_title("Pixel Noise (RMS)")
-        ax0.set_xlabel("X [detector column]")
-        ax0.set_ylabel("Y [detector row]")
-        plt.colorbar(im, ax=ax0, label="Noise [ADU RMS]")
-        ax0.text(0.03, 0.97, f"median={np.nanmedian(noise_map):.2f}",
-                transform=ax0.transAxes, va="top", fontsize=9,
-                bbox=dict(boxstyle="round", fc="white", alpha=0.8))
-    else:
-        ax0.text(0.5, 0.5, "No noise data", ha="center", va="center",
-                transform=ax0.transAxes)
-        ax0.axis("off")
+    im = axes[0].imshow(noise_map, origin="lower", cmap="viridis",
+                        vmin=np.nanpercentile(noise_map, 1),
+                        vmax=np.nanpercentile(noise_map, 99), aspect="auto")
+    axes[0].set_title("Pixel Noise (RMS)")
+    axes[0].set_xlabel("X [detector column]")
+    axes[0].set_ylabel("Y [detector row]")
+    plt.colorbar(im, ax=axes[0], label="Noise [ADU RMS]")
 
-    # Histogram
-    ax1 = axes[1]
-    if noise_map is not None:
-        ax1.hist(noise_map.ravel(), bins=100, alpha=0.7, color="green")
-        ax1.axvline(np.nanmedian(noise_map), color="red", lw=2,
-                   label=f"median={np.nanmedian(noise_map):.2f}")
-        ax1.set_xlabel("Noise [ADU RMS]")
-        ax1.set_ylabel("Count")
-        ax1.set_title("Noise Distribution")
-        ax1.legend(fontsize=9)
-        ax1.grid(alpha=0.3)
-    else:
-        ax1.text(0.5, 0.5, "No noise data", ha="center", va="center",
-                transform=ax1.transAxes)
-        ax1.axis("off")
+    axes[1].hist(noise_map.ravel(), bins=100, alpha=0.7, color="green")
+    axes[1].axvline(np.nanmedian(noise_map), color="red", lw=2,
+                    label=f"median={np.nanmedian(noise_map):.2f}")
+    axes[1].set_xlabel("Noise [ADU RMS]")
+    axes[1].set_ylabel("Count")
+    axes[1].set_title("Noise Distribution")
+    axes[1].legend(fontsize=9)
+    axes[1].grid(alpha=0.3)
 
-    # Clipped pixels map
-    ax2 = axes[2]
-    n_clipped = noise.get("n_clipped_map")
+    n_clipped = d.get("n_clipped_map")
     if n_clipped is not None:
-        im = ax2.imshow(n_clipped, origin="lower", cmap="hot",
-                       vmin=0, vmax=np.percentile(n_clipped, 95) if n_clipped.max() > 0 else 1)
-        ax2.set_title("Clipped Frames per Pixel")
-        ax2.set_xlabel("X [detector column]")
-        ax2.set_ylabel("Y [detector row]")
-        plt.colorbar(im, ax=ax2, label="N clipped frames")
+        im = axes[2].imshow(n_clipped, origin="lower", cmap="hot",
+                            vmin=0,
+                            vmax=float(np.percentile(n_clipped, 95)) or 1.0,
+                            aspect="auto")
+        axes[2].set_title("Clipped Frames per Pixel")
+        axes[2].set_xlabel("X [detector column]")
+        axes[2].set_ylabel("Y [detector row]")
+        plt.colorbar(im, ax=axes[2], label="N clipped frames")
     else:
-        ax2.text(0.5, 0.5, "No clip data", ha="center", va="center",
-                transform=ax2.transAxes)
-        ax2.axis("off")
+        axes[2].axis("off")
 
     plt.tight_layout()
-    fig.savefig(out_dir / "noise_global.png", dpi=150, bbox_inches="tight")
+    p = out_dir / "noise_global.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  → {out_dir / 'noise_global.png'}")
+    print(f"  → {p}")
 
 
-def _plot_bad_pixels_redraw(bad_pixels: dict, noise: dict,
-                            out_dir: Path, meta: dict):
-    """Redraw bad pixel categories and per-ASIC stats."""
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+def _plot_bad_pixels_redraw(d: dict, out_dir: Path) -> None:
+    """Redraw noise with bad pixels hidden, and the bad pixel mask."""
+    noise_map = d.get("noise")
+    bad_mask = d.get("bad_pixel_mask")
+    if noise_map is None or bad_mask is None:
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     fig.suptitle("Bad Pixel Analysis", fontsize=14, fontweight="bold")
 
-    # Bad pixel mask
-    ax0 = axes[0]
-    if "mask" in bad_pixels:
-        mask = bad_pixels["mask"]
-        im = ax0.imshow(mask.astype(float), origin="lower", cmap="Reds",
-                       vmin=0, vmax=1)
-        ax0.set_title(f"Bad Pixel Mask (n={mask.sum():,})")
-        ax0.set_xlabel("X [detector column]")
-        ax0.set_ylabel("Y [detector row]")
-        plt.colorbar(im, ax=ax0, label="Bad (1) / Good (0)")
-    else:
-        ax0.text(0.5, 0.5, "No bad pixel data", ha="center", va="center",
-                transform=ax0.transAxes)
-        ax0.axis("off")
+    im = axes[0].imshow(np.where(bad_mask, np.nan, noise_map), origin="lower",
+                        cmap="viridis", aspect="auto")
+    axes[0].set_title("Noise Map (bad pixels hidden)")
+    axes[0].set_xlabel("X [detector column]")
+    axes[0].set_ylabel("Y [detector row]")
+    plt.colorbar(im, ax=axes[0], label="ADU RMS")
 
-    # Noise histogram with thresholds
-    ax1 = axes[1]
-    if "noise_hist_edges" in bad_pixels and "noise_hist_counts" in bad_pixels:
-        edges = bad_pixels["noise_hist_edges"]
-        counts = bad_pixels["noise_hist_counts"]
-        ax1.hist(edges[:-1], bins=edges, weights=counts, alpha=0.7, color="blue")
-
-        thresholds = bad_pixels.get("thresholds", {})
-        if thresholds:
-            hot = thresholds.get("hot_threshold")
-            cold = thresholds.get("cold_threshold")
-            if hot:
-                ax1.axvline(hot, color="red", lw=2, ls="--",
-                           label=f"HOT threshold={hot:.2f}")
-            if cold:
-                ax1.axvline(cold, color="orange", lw=2, ls="--",
-                           label=f"COLD threshold={cold:.2f}")
-            ax1.legend(fontsize=9)
-
-        ax1.set_xlabel("Noise [ADU RMS]")
-        ax1.set_ylabel("Count")
-        ax1.set_title("Noise Distribution with Thresholds")
-        ax1.grid(alpha=0.3)
-    else:
-        ax1.text(0.5, 0.5, "No noise histogram", ha="center", va="center",
-                transform=ax1.transAxes)
-        ax1.axis("off")
-
-    # Per-ASIC bad pixel counts
-    ax2 = axes[2]
-    if "per_asic" in bad_pixels:
-        per_asic = bad_pixels["per_asic"]
-        n_bad = per_asic.get("n_bad", [])
-        labels = per_asic.get("asic_labels", [])
-
-        if len(n_bad) > 0:
-            colors = plt.cm.Set3(np.linspace(0, 1, len(n_bad)))
-            bars = ax2.bar(labels if labels else range(len(n_bad)),
-                          n_bad, color=colors)
-            ax2.set_xlabel("ASIC")
-            ax2.set_ylabel("N Bad Pixels")
-            ax2.set_title("Bad Pixels per ASIC")
-            ax2.tick_params(axis="x", rotation=45)
-
-            # Add count labels on bars
-            for bar, count in zip(bars, n_bad):
-                ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
-                        str(count), ha="center", va="bottom", fontsize=8)
-        else:
-            ax2.text(0.5, 0.5, "No per-ASIC data", ha="center", va="center",
-                    transform=ax2.transAxes)
-            ax2.axis("off")
-    else:
-        ax2.text(0.5, 0.5, "No per-ASIC data", ha="center", va="center",
-                transform=ax2.transAxes)
-        ax2.axis("off")
+    axes[1].imshow(bad_mask, origin="lower", cmap="gray_r", aspect="auto")
+    axes[1].set_title(f"Bad Pixel Mask (N={int(bad_mask.sum())})")
+    axes[1].set_xlabel("X [detector column]")
+    axes[1].set_ylabel("Y [detector row]")
 
     plt.tight_layout()
-    fig.savefig(out_dir / "bad_pixels_global.png", dpi=150, bbox_inches="tight")
+    p = out_dir / "bad_pixels_global.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  → {out_dir / 'bad_pixels_global.png'}")
+    print(f"  → {p}")
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Redraw offset stage plots from offset_results.h5")
-    parser.add_argument("results", nargs="?", default="output/offset_results.h5",
-                       help="Path to offset_results.h5")
+        description="Redraw offset stage plots from .npy calibration files")
+    parser.add_argument("npy_dir", nargs="?", default="output",
+                        help="Directory containing offset .npy files")
     parser.add_argument("-o", "--output", default=None,
-                       help="Output directory for plots")
+                        help="Output directory for plots")
     args = parser.parse_args()
 
-    redraw_offset_plots(args.results, args.output)
+    redraw_offset_plots(args.npy_dir, args.output)
 
 
 if __name__ == "__main__":
